@@ -1,6 +1,7 @@
 import gradio as gr
 import asyncio
 import numpy as np
+from starlette.requests import ClientDisconnect
 from fastrtc import (
     get_stt_model, get_tts_model, ReplyOnPause, AdditionalOutputs,
     get_hf_turn_credentials, AlgoOptions, SileroVadOptions, wait_for_item
@@ -64,7 +65,7 @@ class GradioUI:
             import traceback
             traceback.print_exc()
 
-    async def audio_input_handler(self, audio_data: tuple[int, np.ndarray], user_id: str, chatbot: list[dict] | None = None) -> tuple[int, np.ndarray] | None:
+    async def audio_input_handler(self, audio_data: tuple[int, np.ndarray], user_id: str, chatbot: list[dict] | None = None) -> tuple[tuple[int, np.ndarray] | None, list[dict]]:
         """Handle incoming audio from the user with optimized streaming."""
         try:
             chatbot = chatbot or []
@@ -74,12 +75,12 @@ class GradioUI:
                 sample_rate, audio_array = audio_data
             else:
                 print(f"Warning: Unexpected audio data format: {type(audio_data)}")
-                return
+                return None, chatbot
             
             # Ensure audio data is in the correct format
             if not isinstance(audio_array, np.ndarray):
                 print(f"Warning: Audio data is not a numpy array: {type(audio_array)}")
-                return
+                return None, chatbot
             
             # Convert to mono if stereo
             if len(audio_array.shape) > 1 and audio_array.shape[1] > 1:
@@ -94,43 +95,53 @@ class GradioUI:
             if np.max(np.abs(audio_array)) > 1.0:
                 audio_array = audio_array / 32768.0
             
-            # Process audio through AudioGroupChat
-            response = await self.audio_chat._handle_audio_input((sample_rate, audio_array), user_id)
-            if not response:
-                return None, chatbot
-            
-            # Update chat history with user's message
-            if response.get("text"):
-                text = response["text"]
-                print(f"Transcribed text: {text}")
-                chatbot.append({
-                    "role": "user",
-                    "content": text,
-                    "name": user_id
-                })
+            try:
+                # Process audio through AudioGroupChat
+                response = await self.audio_chat._handle_audio_input((sample_rate, audio_array), user_id)
+                if not response:
+                    return None, chatbot
                 
-                # Add to voice queue for processing
-                await self.audio_chat.voice_queue.put({
-                    "type": "chat",
-                    "text": text,
-                    "sender": user_id,
-                    "channel": "voice"
-                })
-            
-            # Add agent responses to chat history
-            agent_responses = response.get("agent_responses", [])
-            for agent_response in agent_responses:
-                if isinstance(agent_response, dict):
-                    agent_name = agent_response.get("name", "Assistant")
-                    content = agent_response.get("content")
-                    if content:
-                        chatbot.append({
-                            "role": "assistant",
-                            "content": content,
-                            "name": agent_name
-                        })
-            
-            return None, chatbot
+                # Update chat history with user's message
+                if response.get("text"):
+                    text = response["text"]
+                    print(f"Transcribed text: {text}")
+                    chatbot.append({"role": "user", "content": text})
+                    
+                    # Add to voice queue for processing
+                    await self.audio_chat.voice_queue.put({
+                        "type": "chat",
+                        "text": text,
+                        "sender": user_id,
+                        "channel": "voice"
+                    })
+                
+                # Add agent responses to chat history
+                agent_responses = response.get("agent_responses", [])
+                for agent_response in agent_responses:
+                    if isinstance(agent_response, dict):
+                        content = agent_response.get("content")
+                        sender = agent_response.get("name", "Assistant")
+                        if content:
+                            chat_message = {
+                                "role": "assistant",
+                                "content": content,
+                                "name": sender
+                            }
+                            chatbot.append(chat_message)
+                            
+                            # Queue for TTS
+                            await self.audio_chat.voice_queue.put({
+                                "type": "chat",
+                                "text": content,
+                                "sender": sender,
+                                "channel": "voice"
+                            })
+                
+                return None, chatbot
+                
+            except ClientDisconnect:
+                self._log_error("Client disconnected during audio processing")
+                return None, chatbot
                     
         except Exception as e:
             self._log_error("Audio input processing error", e)
@@ -138,49 +149,101 @@ class GradioUI:
 
     async def audio_output_handler(self):
         """Handle audio output stream."""
+        # Initialize chatbot history
+        chatbot = []
+        
         # Return empty audio initially
-        yield (48000, np.zeros((1, 48000), dtype=np.float32))
+        yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
         
         while True:
             try:
                 # Get audio stream from AudioGroupChat
                 participant = self.audio_chat.human_participants.get(self.current_user_id)
-                if participant and participant.get("active") and "stream" in participant:
+                if participant and participant.get("active"):
                     # Process audio frames from the queue
                     try:
                         audio_data = await asyncio.wait_for(self.audio_chat.voice_queue.get(), timeout=0.1)
                         if isinstance(audio_data, dict):
                             # Handle chat message
                             if audio_data.get("type") == "chat" and audio_data.get("text"):
-                                yield AdditionalOutputs([{
-                                    "role": "assistant",
-                                    "content": audio_data["text"],
-                                    "name": audio_data.get("sender", "Assistant")
-                                }])
+                                sender = audio_data.get("sender", "Assistant")
+                                text = audio_data["text"]
+                                
+                                # Add message to chat history with sender info
+                                chat_message = {
+                                    "role": "assistant" if sender not in self.audio_chat.human_participants else "user",
+                                    "content": text,
+                                    "name": sender
+                                }
+                                chatbot.append(chat_message)
+                                
+                                # Convert text to speech if it's from an agent
+                                if sender not in self.audio_chat.human_participants:
+                                    try:
+                                        # Call TTS and handle result
+                                        tts_result = self.audio_chat.tts_model.tts(text)
+                                        
+                                        # Handle both awaitable and non-awaitable results
+                                        if not hasattr(tts_result, '__await__'):
+                                            sample_rate, audio_data = tts_result
+                                        else:
+                                            sample_rate, audio_data = await asyncio.wait_for(
+                                                tts_result,
+                                                timeout=5.0
+                                            )
+                                            
+                                        if audio_data is not None:
+                                            # Ensure correct format
+                                            if audio_data.dtype != np.float32:
+                                                audio_data = audio_data.astype(np.float32)
+                                            if np.max(np.abs(audio_data)) > 1.0:
+                                                audio_data = audio_data / 32768.0
+                                                
+                                            # Broadcast audio
+                                            await self.audio_chat._broadcast_audio_to_participants((sample_rate, audio_data))
+                                        else:
+                                            print(f"TTS failed for message: {text}")
+                                    except asyncio.TimeoutError:
+                                        print(f"TTS timed out for message: {text}")
+                                    except Exception as e:
+                                        self._log_error("Text-to-speech error", e)
+                                
+                                # Return updated chat history
+                                yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
+                                
                         elif isinstance(audio_data, tuple) and len(audio_data) == 2:
                             # Handle audio data
                             sample_rate, audio_array = audio_data
                             if len(audio_array.shape) == 1:
                                 audio_array = audio_array.reshape(1, -1)
-                            yield (sample_rate, audio_array)
+                            yield (sample_rate, audio_array), chatbot
                         else:
-                            yield (48000, np.zeros((1, 48000), dtype=np.float32))
+                            yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
+                            
                     except asyncio.TimeoutError:
                         # No audio available, yield silence
-                        yield (48000, np.zeros((1, 48000), dtype=np.float32))
+                        yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
+                    except ClientDisconnect:
+                        # Client disconnected, clean up and exit
+                        self._log_error("Client disconnected")
+                        return
                     except Exception as e:
                         self._log_error("Error processing audio output", e)
-                        yield (48000, np.zeros((1, 48000), dtype=np.float32))
+                        yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
                     
                     await asyncio.sleep(0.02)  # Small delay to prevent busy-waiting
                 else:
                     # No audio stream available, yield silence
-                    yield (48000, np.zeros((1, 48000), dtype=np.float32))
+                    yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
                     await asyncio.sleep(0.1)  # Longer delay when no stream
+            except ClientDisconnect:
+                # Client disconnected, clean up and exit
+                self._log_error("Client disconnected")
+                return
             except Exception as e:
                 self._log_error("Audio output error", e)
                 # Yield silence and wait before retrying
-                yield (48000, np.zeros((1, 48000), dtype=np.float32))
+                yield (48000, np.zeros((1, 48000), dtype=np.float32)), chatbot
                 await asyncio.sleep(1)
 
     async def init_audio_session(self):
@@ -243,6 +306,9 @@ class GradioUI:
                 show_progress=False,
                 queue=True
             )
+            
+            # Enable queuing for smoother audio handling
+            demo.queue()
             
             return demo
 

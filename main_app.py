@@ -19,17 +19,17 @@ Your expertise is in providing detailed explanations and alternative perspective
 You should respond in a conversational, friendly tone and keep responses concise and sound natural.
 """
 
-# Configure OpenAI settings
+# Configure Ollama settings
 config_list = [{
-    "model": "gpt-4",
-    "api_key": os.getenv("OPENAI_API_KEY"),
-    "timeout": 120
+    "model": "llama3.2", #    "model": "deepseek-r1:1.5b",
+    "base_url": "http://localhost:11434/v1",
+    "price": [0.00, 0.00],
 }]
 
 # Configure LLM settings
 llm_config = {
     "temperature": 0.7,
-    "config_list": config_list
+    "config_list": config_list,
 }
 
 # Create properly configured agents with system prompts
@@ -57,7 +57,7 @@ Do not generate responses on your own - only relay the actual transcribed human 
 human_agent = UserProxyAgent(
     name="user_123", 
     system_message=human_system_prompt,
-    human_input_mode="NEVER", 
+    human_input_mode="NEVER",
     code_execution_config={"use_docker": False}
 )
 
@@ -91,8 +91,7 @@ async def main():
     await audio_chat.initialize()
     
     print("5. Starting audio session...")
-    # Initialize audio session
-    await audio_chat.start_audio_session("user_123")
+    # Audio session and participant addition will be handled by Gradio UI
     
     print("6. Creating Gradio interface...")
     # Create and launch the Gradio UI with our audio chat instance
