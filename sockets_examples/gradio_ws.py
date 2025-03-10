@@ -172,5 +172,16 @@ class GradioUI:
         return demo
 
 if __name__ == "__main__":
+    # Create UI
     ui = GradioUI()
-    ui.create_interface().launch()
+    
+    # Create and launch interface
+    demo = ui.create_interface()
+    demo.queue()
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=True,
+        show_error=True,
+        quiet=False
+    )

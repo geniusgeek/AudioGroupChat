@@ -86,25 +86,38 @@ print("   - Manager attached:", audio_chat.manager is not None)
  
 
 async def main():
-    print("\n4. Initializing audio chat components...")
-    # Initialize async tasks
-    await audio_chat.initialize()
-    
-    print("5. Starting audio session...")
-    # Audio session and participant addition will be handled by Gradio UI
-    
-    print("6. Creating Gradio interface...")
-    # Create and launch the Gradio UI with our audio chat instance
-    ui = GradioUI(audio_chat=audio_chat)
-    demo = ui.create_interface()
-    
-    print("7. Launching web interface...")
-    # Launch with specific configurations
-    await demo.launch(
-        server_name="0.0.0.0",  # Listen on all network interfaces
-        server_port=7860,       # Default Gradio port
-        share=True              # Create a public link
-    )
+    try:
+        print("\n4. Creating Gradio interface...")
+        # Create and launch the Gradio UI with our audio chat instance
+        ui = GradioUI(audio_chat=audio_chat)
+        demo = ui.create_interface()
+        
+        print("5. Initializing audio chat components...")
+        # Initialize audio chat
+        await audio_chat.initialize()
+        
+        print("6. Starting audio session...")
+        # Audio session and participant addition will be handled by Gradio UI
+        
+        print("7. Launching web interface...")
+        # Launch with specific configurations
+        await demo.launch(
+            server_name="0.0.0.0",  # Listen on all network interfaces
+            server_port=7860,       # Default Gradio port
+            share=True,             # Create a public link
+            show_error=True,        # Show any errors that occur
+            quiet=False             # Show all output
+        )
+    except Exception as e:
+        print(f"Error: {e}")
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Create and run event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
