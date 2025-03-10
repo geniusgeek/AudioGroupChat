@@ -1,0 +1,12 @@
+import type { Headers, HeadersWithIDs, TableCell, TableData, CountConfig, ElementRefs, DataBinding } from "../types";
+import type { SortDirection } from "./sort_utils";
+export declare function make_cell_id(row: number, col: number): string;
+export declare function make_header_id(col: number): string;
+export declare function process_data(input_values: (string | number)[][], row_count: CountConfig, col_count: CountConfig, headers: Headers, show_row_numbers: boolean, element_refs: ElementRefs, data_binding: DataBinding): TableData;
+export declare function make_headers(input_headers: Headers, show_row_numbers: boolean, col_count: CountConfig, element_refs: ElementRefs): HeadersWithIDs[];
+export declare function get_max(data: TableData): TableCell[];
+export declare function sort_table_data(data: TableData, display_value: string[][] | null, styling: string[][] | null, col: number, dir: SortDirection): void;
+export declare function copy_table_data(data: TableData, selected_cells: [number, number][]): Promise<void>;
+export declare function guess_delimiter(text: string, possibleDelimiters: string[]): string[];
+export declare function data_uri_to_blob(data_uri: string): Blob;
+export declare function handle_file_upload(data_uri: string, update_headers: (headers: Headers) => HeadersWithIDs[], update_values: (values: (string | number)[][]) => void): void;

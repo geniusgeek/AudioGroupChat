@@ -1,0 +1,19 @@
+{
+  "name": "audiogroupchat",
+  "version": "1.0.0",
+  "description": "Audio-enabled group chat implementation using FastRTC and AutoGen",
+  "main": "audio_groupchat.js",
+  "scripts": {
+    "start": "python3 example_usage.py"
+  },
+  "dependencies": {
+    "@fastrtc/core": "file:../fastrtc/backend/fastrtc", 
+    "autogen": "0.0.1",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "web-streams-polyfill": "^3.2.1",
+    "ffmpeg-static": "^5.1.0",
+    "uuid": "^9.0.0",
+    "gradio": "^3.50.0"
+  }
+}

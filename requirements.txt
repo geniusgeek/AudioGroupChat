@@ -1,0 +1,7 @@
+autogen
+fastrtc[vad,tts]
+kokoro-onnx
+numpy
+python-socketio
+twilio
+uvicorn

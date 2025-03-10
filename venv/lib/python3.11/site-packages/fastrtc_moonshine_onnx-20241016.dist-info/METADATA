@@ -1,0 +1,26 @@
+Metadata-Version: 2.2
+Name: fastrtc-moonshine-onnx
+Version: 20241016
+Summary: Fork of moonshine_onnx on pypi. Speech recognition for live transcription and voice commands with the Moonshine ONNX models.
+Home-page: https://github.com/usefulsensors/moonshine
+Author: Useful Sensors
+License: MIT
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: tokenizers>=0.19.0
+Requires-Dist: onnxruntime
+Requires-Dist: huggingface_hub
+Requires-Dist: librosa
+Dynamic: author
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# useful-moonshine-onnx
+
+Moonshine is a family of speech-to-text models optimized for fast and accurate automatic speech recognition (ASR) on resource-constrained devices. This package contains inference code for using Moonshine models with the ONNX runtime. For more information, please refer to the [project repo on GitHub](https://github.com/usefulsensors/moonshine).

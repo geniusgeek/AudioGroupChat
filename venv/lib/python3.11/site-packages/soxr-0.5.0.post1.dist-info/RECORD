@@ -1,0 +1,14 @@
+soxr-0.5.0.post1.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+soxr-0.5.0.post1.dist-info/METADATA,sha256=d3IC8orzKgrjvj4sAF83OOLCuMh9SpIGz8SvpUQC4QA,5612
+soxr-0.5.0.post1.dist-info/RECORD,,
+soxr-0.5.0.post1.dist-info/WHEEL,sha256=N8zBE42V67iJxBubESy7jfYBapvoxIISDwTj1fz_CcM,114
+soxr-0.5.0.post1.dist-info/licenses/COPYING.LGPL,sha256=8vEYuQKewYcblTY57MRmUbL8e2LilebPPvKsTJoFizM,26432
+soxr-0.5.0.post1.dist-info/licenses/LICENSE-PFFFT.txt,sha256=qfPSNvPBSkGhKT8XbUx8RthUBEA0F_y4321slwcQTkI,2122
+soxr-0.5.0.post1.dist-info/licenses/LICENSE-libsoxr.txt,sha256=3JhnY0H9zSnZ8nnJZ51qdSiHhbF03tjRsuMWw2YWYTU,1024
+soxr-0.5.0.post1.dist-info/licenses/LICENSE.txt,sha256=rut7zlmj3Me7CKSKLwEvNAxrKOxQzSLwrZMZSn0lRCA,713
+soxr/__init__.py,sha256=iR7IScGcN56HwIvs6tnAFRnUsz1pgaIiCLKZKKVpijM,7257
+soxr/__pycache__/__init__.cpython-311.pyc,,
+soxr/__pycache__/_version.cpython-311.pyc,,
+soxr/_version.py,sha256=Nh4cwY9yUxhLKQWKgrN6rCv-BjIo3AxahOccD_5OfYA,417
+soxr/soxr_ext.cpython-311-darwin.so,sha256=hKXv3f0Feuqhx1okoq2qj4DoncnWJQ7rdViu5k-sVC0,350256
+soxr/soxr_ext.pyi,sha256=MPuhN4U18LyFZiHq3W2B_ognQK7R6svsahWrw16Pxsg,4625
