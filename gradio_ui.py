@@ -1,4 +1,5 @@
 import asyncio
+import numpy as np
 import gradio as gr
 from audio_groupchat import AudioGroupChat
 
@@ -128,21 +129,26 @@ class GradioUI:
                         show_label=True,
                         lines=2
                     )
-                    # Audio output
+                    # Audio output for agent responses
                     audio_output = gr.Audio(
                         label="AI Response",
                         autoplay=True,
                         show_label=True,
                         type="numpy",
+                        streaming=False,  # Set to False for complete audio chunks
                         interactive=False,
                         elem_id="audio-output",
-                        format="wav",
-                     )
+                        format="wav"
+                    )
             
             # Configure stream components
             self.stream.additional_inputs = [user_id]
-            self.stream.additional_outputs = [self.messages]
+            self.stream.additional_outputs = [audio_output, self.messages]
             self.stream.additional_outputs_handler = self._update_messages
+            
+            # Configure audio output
+            audio_output.autoplay = True
+            audio_output.show_download = False
             
             # Get the ReplyOnPause handler from the stream
             if not self.stream.event_handler:
@@ -151,93 +157,63 @@ class GradioUI:
             # Create a wrapper function to handle the audio stream
             async def handle_audio_stream(audio_data, user):
                 try:
-                    # Check if we have valid audio data
                     if audio_data is None:
                         print("No audio data received")
-                        return None, self.messages.value
-                        
-                    # Print debug info
+                        yield None, self.messages.value
+                        return
+
                     print(f"Received audio input: {type(audio_data)}")
-                    if isinstance(audio_data, tuple) and len(audio_data) == 2:
-                        sr, data = audio_data
-                        print(f"Processing audio: sr={sr}, shape={data.shape}")
                     
                     # Process audio through AudioGroupChat
-                    response = await self.audio_chat._handle_audio_input(audio_data, user)
+                    await self.audio_chat._handle_audio_input(audio_data, user)
                     
-                    # Update chat messages from AudioGroupChat history
-                    messages = []
+                    # Get audio response from AudioGroupChat
+                    audio_response = await self.audio_chat.handle_audio_output()
                     
-                    # Check voice queue first
-                    audio_response = None
-                    try:
-                        while True:  # Process all available voice messages
-                            voice_msg = self.audio_chat.voice_queue.get_nowait()
-                            if isinstance(voice_msg, dict) and voice_msg.get("type") == "chat":
-                                text = voice_msg.get("text")
-                                sender = voice_msg.get("sender")
-                                if text:
-                                    # Add message in dict format
-                                    msg = {
-                                        "role": "user" if sender == user else "assistant",
-                                        "content": text,
-                                        "name": sender
-                                    }
-                                    messages.append(msg)
-                                    # Convert to speech if it's an assistant message
-                                    if sender != user:
-                                        audio_response = await self.audio_chat.text_to_speech(text)
-                    except asyncio.QueueEmpty:
-                        pass
-                        
-                    # Check text queue
-                    try:
-                        while True:  # Process all available text messages
-                            text_msg = self.audio_chat.text_queue.get_nowait()
-                            if isinstance(text_msg, dict) and text_msg.get("type") == "chat":
-                                text = text_msg.get("text")
-                                sender = text_msg.get("sender")
-                                if text:
-                                    # Add message in dict format
-                                    msg = {
-                                        "role": "user" if sender == user else "assistant",
-                                        "content": text,
-                                        "name": sender
-                                    }
-                                    messages.append(msg)
-                    except asyncio.QueueEmpty:
-                        pass
+                    # Return the audio response and updated messages
+                    if audio_response is not None:
+                        # Convert sample rate from 24kHz to 48kHz and dtype to int16
+                        resampled_audio = np.repeat(audio_response, 2)
+                        int16_audio = (resampled_audio * 32767).astype(np.int16)
+                        print(f"Audio output: is {int16_audio}")
+                        yield (48000, int16_audio), self.audio_chat.messages
+                    else:
+                        yield None, self.audio_chat.messages
                     
-                    return audio_response, messages
                 except Exception as e:
                     self._log_error("Error in handle_audio_stream", e)
-                    return None, self.messages.value
+                    yield None, self.messages.value
 
             # Create a wrapper function to handle text input
             async def handle_text_input(text, user):
-                if not text or not text.strip():
-                    return None, self.messages.value
+                try:
+                    if not text or not text.strip():
+                        yield None, self.messages.value
+                        return
                     
-                # Create chat message
-                message = {
-                    "role": "user",
-                    "content": text,
-                    "name": user
-                }
-                
-                # Add message to chat history
-                self.audio_chat.messages.append(message)
-                
-                # Process through AudioGroupChat
-                await self.audio_chat._handle_chat_message(user, {
-                    "type": "chat",
-                    "text": text,
-                    "sender": user,
-                    "channel": "text"
-                })
-                
-                # Return current chat history
-                return None, self.audio_chat.messages
+                    # Process text through AudioGroupChat
+                    await self.audio_chat._handle_chat_message(user, {
+                        "type": "chat",
+                        "text": text,
+                        "sender": user,
+                        "channel": "text"
+                    })
+                    
+                    # Get audio response from AudioGroupChat
+                    audio_response = await self.audio_chat.handle_audio_output()
+                    
+                    # Return the audio response and updated messages
+                    if audio_response is not None:
+                        # Convert sample rate from 24kHz to 48kHz and dtype to int16
+                        resampled_audio = np.repeat(audio_response, 2)
+                        int16_audio = (resampled_audio * 32767).astype(np.int16)
+                        yield (48000, int16_audio), self.audio_chat.messages
+                    else:
+                        yield None, self.audio_chat.messages
+                    
+                except Exception as e:
+                    self._log_error("Error in handle_text_input", e)
+                    yield None, self.messages.value
             
             # Attach components to handlers
             audio_input.stream(
@@ -246,7 +222,8 @@ class GradioUI:
                 outputs=[audio_output, self.messages],
                 show_progress=False,
                 queue=True,  # Enable queueing for async
-                batch=False   # Process each audio chunk immediately
+                batch=False,  # Process each audio chunk immediately
+                max_batch_size=1  # Process one chunk at a time
             )
             
             text_input.submit(

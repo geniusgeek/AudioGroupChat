@@ -11,7 +11,6 @@ from fastrtc import get_tts_model, get_stt_model, get_twilio_turn_credentials
 from aiortc.mediastreams import AudioStreamTrack as FastRTCAudioStreamTrack
 from fastrtc.reply_on_pause import ReplyOnPause, AlgoOptions, AppState
 from fastrtc.stream import Stream as FastRTCStream
-from fastrtc.pause_detection import get_silero_model
 import time
 import random
 
@@ -30,6 +29,7 @@ class AudioGroupChat(GroupChat):
         print("Initializing TTS model...")
         self.tts_model = get_tts_model("kokoro")
         print("TTS model initialized")
+        self.tts_sample_rate = 24000  # Standard sample rate for TTS output
         
         print("Initializing STT model...")
         self.stt_model = get_stt_model()
@@ -84,14 +84,14 @@ class AudioGroupChat(GroupChat):
                     audio_array = np.frombuffer(audio_array, dtype=np.float32)
                 elif isinstance(audio_array, list):
                     audio_array = np.array(audio_array, dtype=np.float32)
-                
+            
                 # Convert to mono if stereo
                 if len(audio_array.shape) > 1:
                     audio_array = np.mean(audio_array, axis=1)
-                
+            
                 # Ensure 1D array
                 audio_array = audio_array.reshape(-1)
-                
+            
                 # Normalize audio to [-1, 1] range
                 if audio_array.dtype != np.float32:
                     audio_array = audio_array.astype(np.float32)
@@ -424,15 +424,13 @@ class AudioGroupChat(GroupChat):
             return None
     
     async def handle_audio_output(self):
-        """Stream audio output for Gradio UI.
+        """Get the next audio output for Gradio UI.
         
-        This method continuously monitors messages and converts them to speech.
-        
-        Yields:
-            tuple: A tuple of (sample_rate, audio_data) for Gradio audio output
+        Returns:
+            numpy.ndarray: Audio data array for Gradio audio output, or None if no audio
         """
         try:
-            # Get the latest message from the chat
+            # First check the message list for new messages
             if self.messages and len(self.messages) > self._last_message_count:
                 last_message = self.messages[-1]
                 self._last_message_count = len(self.messages)
@@ -445,23 +443,72 @@ class AudioGroupChat(GroupChat):
                     text = last_message.get('content', '')
                     
                 if text and text.strip():
-                    print(f"Converting to speech: {text}")
-                    # Convert to speech and yield audio
+                    print(f"Converting to speech from message list: {text}")
+                    # Convert to speech and return audio
                     audio = await self.text_to_speech(text)
                     if audio is not None:
-                        print("Audio generated successfully")
-                        return (48000, audio)  # Use WebRTC standard sample rate
-                    else:
-                        print("Failed to generate audio")
+                        print("Audio generated successfully from message list")
+                        return audio[1]  # Return just the audio data
+            
+            # Then check the voice queue
+            try:
+                # Get next message from voice queue without blocking
+                message = self.voice_queue.get_nowait()
+                print(f"Processing voice queue message: {message}")
+                
+                if isinstance(message, dict):
+                    if message.get("type") == "chat":
+                        text = message.get("text")
+                        sender = message.get("sender")
                         
+                        if text and sender and sender not in self.human_participants:
+                            print(f"Converting to speech from voice queue: {text} from {sender}")
+                            try:
+                                # Convert to speech with timeout
+                                sample_rate, audio_data = await asyncio.wait_for(
+                                    self.tts_model.tts(text),
+                                    timeout=5.0
+                                )
+                                
+                                if audio_data is not None:
+                                    # Ensure correct format
+                                    if audio_data.dtype != np.float32:
+                                        audio_data = audio_data.astype(np.float32)
+                                    if np.max(np.abs(audio_data)) > 1.0:
+                                        audio_data = audio_data / 32768.0
+                                    
+                                    print(f"Broadcasting TTS audio for {sender}")
+                                    # Broadcast to all participants
+                                    await self._broadcast_audio_to_participants((sample_rate, audio_data))
+                                    
+                                    # Return for Gradio UI
+                                    return audio_data
+                                else:
+                                    print(f"TTS failed for message from {sender}: {text}")
+                                    
+                            except asyncio.TimeoutError:
+                                print(f"TTS timed out for message: {text}")
+                            except Exception as e:
+                                print(f"Error converting message to speech: {e}")
+                                import traceback
+                                traceback.print_exc()
+                    elif message.get("type") == "audio":
+                        # Direct audio data
+                        audio_data = message.get("audio_data")
+                        if audio_data is not None:
+                            return audio_data
+            except asyncio.QueueEmpty:
+                pass
+                
+            return None
+                
         except Exception as e:
-            print(f"Error in handle_audio_output: {e}")
+            print(f"Error in audio output handler: {e}")
             import traceback
             traceback.print_exc()
-            
-        return None
+            return None
 
-    async def text_to_speech(self, text: str | dict, user_id: str = None) -> np.ndarray | None:
+    async def text_to_speech(self, text: str | dict, user_id: str = None) -> tuple[int, np.ndarray] | None:
         """Convert text to speech and send it to participants.
         
         Args:
@@ -469,7 +516,7 @@ class AudioGroupChat(GroupChat):
             user_id: Optional target user ID. If None, broadcast to all
             
         Returns:
-            np.ndarray: Audio data if successful, None otherwise
+            tuple: A tuple of (sample_rate, audio_data) if successful, None otherwise
         """
         try:
             # Extract text from chat result if needed
@@ -497,6 +544,9 @@ class AudioGroupChat(GroupChat):
                         tts_result,
                         timeout=5.0  # 5 second timeout
                     )
+                    
+                print(f"TTS generated audio: sr={sample_rate}, shape={audio_data.shape}")
+                    
             except asyncio.TimeoutError:
                 print("TTS timed out")
                 return None
@@ -511,14 +561,16 @@ class AudioGroupChat(GroupChat):
             if np.max(np.abs(audio_data)) > 1.0:
                 audio_data = audio_data / 32768.0
                 
-            print("Broadcasting audio to participants")
-            # Broadcast to all participants or send to specific user
-            if user_id:
-                await self._send_audio_to_participant(user_id, (sample_rate, audio_data))
-            else:
-                await self._broadcast_audio_to_participants((sample_rate, audio_data))
+            # Add to voice queue for broadcasting
+            await self.voice_queue.put({
+                "type": "audio",
+                "sample_rate": sample_rate,
+                "audio_data": audio_data,
+                "text": text
+            })
                 
-            return audio_data
+            print(f"Added TTS audio to voice queue: {text}")
+            return sample_rate, audio_data
             
         except Exception as e:
             print(f"Error in text_to_speech: {e}")
@@ -607,11 +659,17 @@ class AudioGroupChat(GroupChat):
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Check for any failures
+        success = False
         for user_id, result in zip(participants, results):
             if isinstance(result, Exception):
                 print(f"Failed to send to {user_id}: {result}")
             elif not result:
                 print(f"Failed to send to {user_id}")
+            else:
+                success = True
+                print(f"Successfully sent audio to {user_id}")
+        
+        return success
 
     async def _handle_chat_message(self, user_id: str, msg: Dict[str, Any]):
         """Handle incoming chat messages.
@@ -699,9 +757,14 @@ class AudioGroupChat(GroupChat):
                 }
                 self.messages.append(response_msg)
                     
-                # Convert response to speech if agent voice is enabled
+                # Add agent response to voice queue for TTS
                 if self.agent_voice_enabled:
-                    await self.text_to_speech(response, user_id)
+                    await self.voice_queue.put({
+                        "type": "chat",
+                        "text": response,
+                        "sender": recipient.name,
+                        "channel": "voice"
+                    })
                     
             # Determine channel for message propagation
             channel = message.get("channel", "both")
@@ -730,6 +793,7 @@ class AudioGroupChat(GroupChat):
             
     async def _process_voice_queue(self):
         """Process messages in the voice queue."""
+        print("Checking voice queue...")
         while True:
             try:
                 # Get next message from queue
@@ -741,77 +805,70 @@ class AudioGroupChat(GroupChat):
                     
                 print(f"Processing voice message: {message}")
                 
-                if isinstance(message, tuple) and len(message) == 2:
+                if isinstance(message, dict):
+                    msg_type = message.get("type")
+                    
+                    if msg_type == "chat":
+                        text = message.get("text")
+                        sender = message.get("sender")
+                        
+                        if text and sender:
+                            # Convert to speech if it's from an agent
+                            if sender not in self.human_participants:
+                                print(f"Converting agent message to speech: {text}")
+                                try:
+                                    # Convert to speech with timeout
+                                    sample_rate, audio_data = await asyncio.wait_for(
+                                        self.tts_model.tts(text),
+                                        timeout=5.0
+                                    )
+                                    
+                                    if audio_data is not None:
+                                        # Convert to float32 for consistent format
+                                        if audio_data.dtype == np.int16:
+                                            audio_data = audio_data.astype(np.float32) / 32768.0
+                                        
+                                        print(f"Generated audio: {type(audio_data)}, shape: {audio_data.shape}, sr={sample_rate}Hz")
+                                        await self._broadcast_audio_to_participants((sample_rate, audio_data))
+                                    else:
+                                        print(f"TTS failed for agent message: {text}")
+                                except Exception as e:
+                                    print(f"Error converting agent message to speech: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    
+                    elif msg_type == "audio":
+                        # Direct audio data
+                        sample_rate = message.get("sample_rate")
+                        audio_data = message.get("audio_data")
+                        text = message.get("text")
+                        
+                        if sample_rate and audio_data is not None:
+                            # Convert to float32 for consistent format
+                            if audio_data.dtype == np.int16:
+                                audio_data = audio_data.astype(np.float32) / 32768.0
+                                
+                            print(f"Broadcasting audio for: {text}, sr={sample_rate}Hz")
+                            await self._broadcast_audio_to_participants((sample_rate, audio_data))
+                
+                elif isinstance(message, tuple) and len(message) == 2:
                     # Direct audio data (sample_rate, audio_data)
                     sample_rate, audio_data = message
                     
-                    # Ensure audio is in correct format
-                    if audio_data.dtype != np.float32:
-                        audio_data = audio_data.astype(np.float32)
-                    if np.max(np.abs(audio_data)) > 1.0:
-                        audio_data = audio_data / 32768.0
+                    # Convert to float32 for consistent format
+                    if audio_data.dtype == np.int16:
+                        audio_data = audio_data.astype(np.float32) / 32768.0
                     
                     # Broadcast to all participants
                     await self._broadcast_audio_to_participants((sample_rate, audio_data))
                     
-                elif isinstance(message, dict):
-                    # Text message that needs TTS
-                    text = message.get("text", "")
-                    sender = message.get("sender", "unknown")
-                    
-                    # Skip empty messages
-                    if not text or not text.strip():
-                        continue
-                        
-                    print(f"Processing voice message from {sender}: {text}")
-                    
-                    # Convert to speech if needed
-                    if self.agent_voice_enabled and message.get("type") == "chat":
-                        try:
-                            # If it's an agent message, add the agent name
-                            if sender not in self.human_participants:
-                                text = f"{sender} says: {text}"
-                            
-                            print(f"Converting to speech: {text}")
-                            # Convert to speech with timeout
-                            sample_rate, audio_data = await asyncio.wait_for(
-                                self.tts_model.tts(text),
-                                timeout=5.0
-                            )
-                            
-                            if audio_data is not None:
-                                # Ensure correct format
-                                if audio_data.dtype != np.float32:
-                                    audio_data = audio_data.astype(np.float32)
-                                if np.max(np.abs(audio_data)) > 1.0:
-                                    audio_data = audio_data / 32768.0
-                                    
-                                print(f"Broadcasting TTS audio for {sender}")
-                                await self._broadcast_audio_to_participants((sample_rate, audio_data))
-                                print(f"Successfully broadcasted TTS audio for {sender}")
-                            else:
-                                print(f"TTS failed for message: {text}")
-                                
-                        except asyncio.TimeoutError:
-                            print(f"TTS timed out for message: {text}")
-                        except Exception as e:
-                            print(f"Error converting message to speech: {e}")
-                            import traceback
-                            traceback.print_exc()
-                
-            except asyncio.CancelledError:
-                break
             except Exception as e:
-                print(f"Error in voice queue processor: {e}")
+                print(f"Error processing voice queue: {e}")
                 import traceback
                 traceback.print_exc()
-                await asyncio.sleep(1)
-                    
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"Error in voice queue processor: {e}")
-                await asyncio.sleep(1)
+                
+            # Small delay to prevent busy waiting
+            await asyncio.sleep(0.1)
                 
     async def _process_text_queue(self):
         """Process messages in the text queue."""
@@ -858,13 +915,11 @@ class AudioGroupChat(GroupChat):
                             sample_rate, audio_data = self.tts_model.tts(text)
                                 
                             if audio_data is not None:
-                                # Ensure correct format
-                                if audio_data.dtype != np.float32:
-                                    audio_data = audio_data.astype(np.float32)
-                                if np.max(np.abs(audio_data)) > 1.0:
-                                    audio_data = audio_data / 32768.0
+                                # Convert to float32 for consistent format
+                                if audio_data.dtype == np.int16:
+                                    audio_data = audio_data.astype(np.float32) / 32768.0
                                     
-                                print(f"Broadcasting TTS audio for {sender}")
+                                print(f"Broadcasting TTS audio for {sender}, sr={sample_rate}Hz")
                                 await self._broadcast_audio_to_participants((sample_rate, audio_data))
                             else:
                                 print(f"TTS failed for message: {text}")
@@ -933,12 +988,21 @@ class AudioGroupChat(GroupChat):
             audio_frame: Tuple of (sample_rate, audio_data)
         """
         print("\n=== Broadcasting Audio ===")
+        sample_rate, audio_data = audio_frame
+        print(f"Audio frame: sr={sample_rate}Hz, shape={audio_data.shape}, dtype={audio_data.dtype}")
         
         # Get list of active participants
         participants = [
             user_id for user_id, participant in self.human_participants.items()
             if participant.get("active") and participant.get("stream") is not None
         ]
+        
+        # Add to voice queue for playback
+        await self.voice_queue.put({
+            "type": "audio",
+            "sample_rate": sample_rate,
+            "audio_data": audio_data
+        })
         
         if not participants:
             print("No active participants with streams to broadcast to")
