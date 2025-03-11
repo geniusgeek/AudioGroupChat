@@ -35,30 +35,38 @@ class GradioUI:
         
     def _update_messages(self, prev_messages, new_messages):
         """Update chat history with new messages"""
-        # If new_messages is a list of message dicts, use it directly
-        if isinstance(new_messages, list) and all(isinstance(msg, dict) for msg in new_messages):
-            return new_messages
+        try:
+            # Handle ChatResult objects
+            if hasattr(new_messages, 'chat_history'):
+                messages_to_process = new_messages.chat_history
+            else:
+                messages_to_process = new_messages
+
+            # Convert to list if single message
+            if isinstance(messages_to_process, dict):
+                messages_to_process = [messages_to_process]
             
-        # If new_messages is a list of tuples, convert to dict format
-        if isinstance(new_messages, list) and all(isinstance(msg, (list, tuple)) for msg in new_messages):
-            converted_messages = []
-            for msg in new_messages:
-                if len(msg) == 2:
-                    user_msg, assistant_msg = msg
-                    if user_msg:
-                        converted_messages.append({"role": "user", "content": user_msg})
-                    if assistant_msg:
-                        converted_messages.append({"role": "assistant", "content": assistant_msg})
-            return converted_messages
-        
-        # If it's a single message dict, append it
-        if isinstance(new_messages, dict):
-            role = new_messages.get("role", "")
-            content = new_messages.get("content", "")
-            if role and content:
-                prev_messages.append(new_messages)
+            # Process messages
+            result = []
+            for msg in messages_to_process:
+                if isinstance(msg, dict):
+                    # Skip empty messages
+                    if not msg.get('content', '').strip():
+                        continue
+                        
+                    # Ensure proper role assignment
+                    if msg.get('name') in self.audio_chat.human_participants:
+                        msg['role'] = 'user'
+                    else:
+                        msg['role'] = 'assistant'
+                        
+                    result.append([msg['content'], None] if msg['role'] == 'user' else [None, msg['content']])
                 
-        return prev_messages
+            return result if result else prev_messages
+                
+        except Exception as e:
+            print(f"Error updating messages: {e}")
+            return prev_messages
     
     def _log_error(self, message: str, error: Exception = None):
         """Log error messages with optional exception details."""
