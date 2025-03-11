@@ -967,6 +967,17 @@ class AudioGroupChat(GroupChat):
                 "name": user_id
             }
             
+            # Add to voice queue if it's an agent message and voice is enabled
+            if user_id not in self.human_participants and self.agent_voice_enabled:
+                await self.voice_queue.put({
+                    "type": "chat",
+                    "text": text,
+                    "sender": user_id,
+                    "channel": "both"
+                })
+                print(f"Added agent message to voice queue: {text[:100]}..." if len(text) > 100 else f"Added agent message to voice queue: {text}")
+                chat_message["_voice_queued"] = True  # Use dict entry instead of attribute
+            
             # Add message to messages list for UI updates
             print(f"Adding message to chat history: {chat_message}")
             self.messages.append(chat_message)
@@ -982,11 +993,6 @@ class AudioGroupChat(GroupChat):
             # Always add to text queue for display
             await self.text_queue.put(message_for_queues)
             print(f"Added message to text queue: {text[:100]}..." if len(text) > 100 else f"Added message to text queue: {text}")
-            
-            # Add to voice queue if it's an agent message and voice is enabled
-            if user_id not in self.human_participants and self.agent_voice_enabled:
-                await self.voice_queue.put(message_for_queues)
-                print(f"Added agent message to voice queue: {text[:100]}..." if len(text) > 100 else f"Added agent message to voice queue: {text}")
             
             # Get the first available agent as recipient
             recipient = next((agent for agent in self.agents if agent.name != user_id), None)
@@ -1040,6 +1046,7 @@ class AudioGroupChat(GroupChat):
                         if self.agent_voice_enabled:
                             await self.voice_queue.put(response_for_queues)
                             print(f"Added agent response to voice queue: {response_text[:100]}..." if len(response_text) > 100 else f"Added agent response to voice queue: {response_text}")
+                            response_msg["_voice_queued"] = True  # Use dict entry instead of attribute
                 
         except Exception as e:
             print(f"Error processing chat message: {e}")
@@ -1048,6 +1055,7 @@ class AudioGroupChat(GroupChat):
                 
     async def _monitor_agent_messages(self):
         """Monitor messages between agents and add them to the text queue."""
+        processed_messages = set()  # Track processed messages by content hash
         while True:
             try:
                 # Check for new messages
@@ -1066,9 +1074,29 @@ class AudioGroupChat(GroupChat):
                         text = last_message.get('content', '')
                         sender = last_message.get('name', '')
                     
-                    # Skip processing since messages are now handled by _process_chat_message
-                    if text and text.strip() and sender:
-                        print(f"Message from {sender} already processed by _process_chat_message")
+                    # Generate a unique hash for this message
+                    if text and sender:
+                        message_hash = hash(f"{sender}:{text}")
+                        
+                        # Process only if not seen before and not already queued
+                        if (message_hash not in processed_messages and 
+                            not (isinstance(last_message, dict) and last_message.get("_voice_queued", False)) and
+                            sender not in self.human_participants and 
+                            self.agent_voice_enabled):
+                            
+                            message_for_queues = {
+                                "type": "chat",
+                                "text": text,
+                                "sender": sender,
+                                "channel": "voice"  # Explicitly mark as voice
+                            }
+                            await self.voice_queue.put(message_for_queues)
+                            print(f"Added agent-to-agent message to voice queue: {text[:100]}..." if len(text) > 100 else f"Added agent-to-agent message to voice queue: {text}")
+                            
+                            # Mark as processed
+                            if isinstance(last_message, dict):
+                                last_message["_voice_queued"] = True
+                            processed_messages.add(message_hash)
                 
                 await asyncio.sleep(0.1)  # Small delay to prevent tight loop
                 
@@ -1298,6 +1326,8 @@ class AudioGroupChat(GroupChat):
                             "sender": agent_name,
                             "channel": "voice"
                         })
+                        # Mark message as queued
+                        self.messages[-1]["_voice_queued"] = True  # Use dict entry instead of attribute
                     
                     # Convert to speech if needed
                     if message.get("channel") in ["audio", "both"] and self.agent_voice_enabled:
