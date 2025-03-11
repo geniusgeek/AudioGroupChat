@@ -971,15 +971,22 @@ class AudioGroupChat(GroupChat):
             print(f"Adding message to chat history: {chat_message}")
             self.messages.append(chat_message)
             
-            # Add to voice queue for audio processing if from agent
-            if user_id not in self.human_participants:
-                await self.voice_queue.put({
-                    "type": "chat",
-                    "text": text,  # Send the actual text content
-                    "sender": user_id,
-                    "channel": "voice"
-                })
-                print(f"Added agent message to voice queue: {text}")
+            # Add message to both queues to ensure it's displayed and spoken
+            message_for_queues = {
+                "type": "chat",
+                "text": text,
+                "sender": user_id,
+                "channel": "both"
+            }
+            
+            # Always add to text queue for display
+            await self.text_queue.put(message_for_queues)
+            print(f"Added message to text queue: {text[:100]}..." if len(text) > 100 else f"Added message to text queue: {text}")
+            
+            # Add to voice queue if it's an agent message and voice is enabled
+            if user_id not in self.human_participants and self.agent_voice_enabled:
+                await self.voice_queue.put(message_for_queues)
+                print(f"Added agent message to voice queue: {text[:100]}..." if len(text) > 100 else f"Added agent message to voice queue: {text}")
             
             # Get the first available agent as recipient
             recipient = next((agent for agent in self.agents if agent.name != user_id), None)
@@ -1017,21 +1024,59 @@ class AudioGroupChat(GroupChat):
                         }
                         self.messages.append(response_msg)
                         
-                        # Add agent response to voice queue for TTS
-                        if self.agent_voice_enabled and response_text and isinstance(response_text, str) and response_text.strip():
-                            message = {
-                                "type": "chat",
-                                "text": response_text,  # Send only the latest message content
-                                "sender": recipient.name,
-                                "channel": "voice"
-                            }
-                            await self.voice_queue.put(message)
-                            print(f"Added latest agent response to voice queue: {response_text[:100]}..." if len(response_text) > 100 else f"Added latest agent response to voice queue: {response_text}")
+                        # Add agent response to both queues
+                        response_for_queues = {
+                            "type": "chat",
+                            "text": response_text,
+                            "sender": recipient.name,
+                            "channel": "both"
+                        }
+                        
+                        # Always add to text queue
+                        await self.text_queue.put(response_for_queues)
+                        print(f"Added agent response to text queue: {response_text[:100]}..." if len(response_text) > 100 else f"Added agent response to text queue: {response_text}")
+                        
+                        # Add to voice queue if agent voice is enabled
+                        if self.agent_voice_enabled:
+                            await self.voice_queue.put(response_for_queues)
+                            print(f"Added agent response to voice queue: {response_text[:100]}..." if len(response_text) > 100 else f"Added agent response to voice queue: {response_text}")
                 
         except Exception as e:
             print(f"Error processing chat message: {e}")
             import traceback
             traceback.print_exc()
+                
+    async def _monitor_agent_messages(self):
+        """Monitor messages between agents and add them to the text queue."""
+        while True:
+            try:
+                # Check for new messages
+                if self.messages and len(self.messages) > self._last_message_count:
+                    last_message = self.messages[-1]
+                    self._last_message_count = len(self.messages)
+                    
+                    # Extract text from message
+                    text = None
+                    sender = None
+                    
+                    if isinstance(last_message, tuple):
+                        text = last_message[1]  # Agent's response is in second position
+                        sender = last_message[0].name if hasattr(last_message[0], 'name') else str(last_message[0])
+                    elif isinstance(last_message, dict):
+                        text = last_message.get('content', '')
+                        sender = last_message.get('name', '')
+                    
+                    # Skip processing since messages are now handled by _process_chat_message
+                    if text and text.strip() and sender:
+                        print(f"Message from {sender} already processed by _process_chat_message")
+                
+                await asyncio.sleep(0.1)  # Small delay to prevent tight loop
+                
+            except Exception as e:
+                print(f"Error in agent message monitor: {e}")
+                import traceback
+                traceback.print_exc()
+                await asyncio.sleep(1)
                 
     async def _process_voice_queue(self):
         """Process messages in the voice queue for real-time audio output.
@@ -1189,43 +1234,6 @@ class AudioGroupChat(GroupChat):
                 traceback.print_exc()
                 await asyncio.sleep(1)
 
-    async def _monitor_agent_messages(self):
-        """Monitor messages between agents and add them to the text queue."""
-        while True:
-            try:
-                # Check for new messages
-                if self.messages and len(self.messages) > self._last_message_count:
-                    last_message = self.messages[-1]
-                    self._last_message_count = len(self.messages)
-                    
-                    # Extract text from message
-                    text = None
-                    sender = None
-                    
-                    if isinstance(last_message, tuple):
-                        text = last_message[1]  # Agent's response is in second position
-                        sender = last_message[0].name if hasattr(last_message[0], 'name') else str(last_message[0])
-                    elif isinstance(last_message, dict):
-                        text = last_message.get('content', '')
-                        sender = last_message.get('name', '')
-                    
-                    if text and text.strip() and sender:
-                        # Add to voice queue for TTS
-                        await self.voice_queue.put({
-                            "type": "chat",
-                            "text": text,
-                            "sender": sender,
-                            "channel": "text"
-                        })
-                
-                await asyncio.sleep(0.1)  # Small delay to prevent tight loop
-                
-            except Exception as e:
-                print(f"Error in agent message monitor: {e}")
-                import traceback
-                traceback.print_exc()
-                await asyncio.sleep(1)
-                
     async def _broadcast_audio_to_participants(self, audio_frame: tuple[int, np.ndarray]):
         """Broadcast audio to all active participants.
         
@@ -1386,14 +1394,23 @@ class AudioGroupChat(GroupChat):
         
         print(f"Extracted content: {content[:100]}..." if content and len(content) > 100 else f"Extracted content: {content}")
         
-        # Add message to our queue for processing
+        # Add message to our queues for processing
         if content and isinstance(content, str) and content.strip():
-            print("Adding message to text queue")
-            asyncio.create_task(self.text_queue.put({
+            message_for_queues = {
                 "type": "chat",
                 "text": content,
-                "sender": message.get("name", speaker.name if speaker else "Agent")
-            }))
-        
-        # Call parent class method to maintain normal functionality
+                "sender": speaker.name if speaker else "Unknown",
+                "channel": "both"
+            }
+            
+            # Always add to text queue for display
+            print("Adding message to text queue")
+            asyncio.create_task(self.text_queue.put(message_for_queues))
+            
+            # Add to voice queue if agent voice is enabled
+            if self.agent_voice_enabled:
+                print("Adding message to voice queue")
+                asyncio.create_task(self.voice_queue.put(message_for_queues))
+            
+        # Call parent class's append
         super().append(message, speaker)

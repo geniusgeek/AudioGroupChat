@@ -165,8 +165,19 @@ class GradioUI:
             # Create a wrapper function to handle the audio stream
             async def handle_audio_stream(audio_data, user):
                 try:
-                    if audio_data is None:
-                        print("No audio data received")
+                    if audio_data is None or not isinstance(audio_data, tuple) or len(audio_data) != 2:
+                        print("Invalid or no audio data received")
+                        yield None, self.messages.value
+                        return
+                    
+                    try:
+                        sample_rate, audio_samples = audio_data
+                        if not isinstance(audio_samples, np.ndarray):
+                            print(f"Invalid audio format: {type(audio_samples)}")
+                            yield None, self.messages.value
+                            return
+                    except Exception as e:
+                        print(f"Error unpacking audio data: {e}")
                         yield None, self.messages.value
                         return
 
