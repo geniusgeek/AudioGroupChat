@@ -4,7 +4,7 @@ import json
 import numpy as np
 import threading
 import logging
-from typing import Optional, List, Dict, Any, Union 
+from typing import Optional, List, Dict, Any, Union
 from autogen.agentchat import GroupChat, Agent, UserProxyAgent
 from fastrtc import get_tts_model, get_stt_model, get_twilio_turn_credentials, KokoroTTSOptions
 import traceback
@@ -23,66 +23,25 @@ import random
 from threading import Lock
 
 class AudioGroupChat(GroupChat):
-    """Real-time audio group chat implementation enabling voice and text communication between humans and AI agents.
-    
-    This class extends GroupChat to provide real-time audio processing capabilities:
-    1. Real-time audio streaming via WebRTC
-    2. Speech-to-Text (STT) for human voice input
-    3. Text-to-Speech (TTS) for agent responses
-    4. Parallel message processing for voice and text
-    
-    Key Features:
-    - Real-time audio processing and playback
-    - Multi-participant support
-    - AI agent integration
-    - WebRTC-based streaming
-    - Configurable voice/text channels
-    
-    Audio Pipeline:
-    1. Input: WebRTC → ReplyOnPause → STT → Text
-    2. Processing: Text → Agent → Response
-    3. Output: Response → TTS → WebRTC → Audio
-    
-    Example:
-        chat = AudioGroupChat(agents=[agent1, agent2])
-        user_id = chat.add_human_participant('user1')
-        chat.start_audio_session(user_id)
-        await chat.send_message({'content': 'Hello!', 'sender': 'user1'})
-    """
-    
+    """Real-time audio group chat implementation enabling voice and text communication between humans and AI agents."""
+
     def __init__(self, agents=None, messages=None, max_round=10, speaker_selection_method="round_robin", allow_repeat_speaker=False):
-        """Initialize AudioGroupChat with audio processing capabilities.
-        
-        Args:
-            agents (List[Agent], optional): List of AI agents. Defaults to None.
-            messages (List[Dict], optional): Initial messages. Defaults to None.
-            max_round (int, optional): Maximum conversation rounds. Defaults to 10.
-            speaker_selection_method (str, optional): Method to select next speaker. Defaults to "round_robin".
-            allow_repeat_speaker (bool, optional): Allow same speaker consecutively. Defaults to False.
-            
-        Components Initialized:
-        1. TTS Model: For converting text to speech
-        2. STT Model: For converting speech to text
-        3. WebRTC: For real-time audio streaming
-        4. Message Queues: For parallel processing
-        5. Participant Tracking: For managing users
-        """
-        # Initialize GroupChat with proper parameters
+        """Initialize AudioGroupChat with audio processing capabilities."""
         super().__init__(
-            agents=agents or [], 
+            agents=agents or [],
             messages=messages or [],
             max_round=max_round,
             speaker_selection_method=speaker_selection_method,
             allow_repeat_speaker=allow_repeat_speaker,
         )
-        
+
         # Set up logger for this instance
         self.logger = logging.getLogger(f"{__name__}.{id(self)}")
         self.logger.info("Initializing new AudioGroupChat instance")
-        
+
         # Enable agent voice by default
         self.agent_voice_enabled = True
-        
+
         # Initialize audio processing components
         print("Initializing TTS models...")
         # Map of agent names to voice models and options
@@ -100,7 +59,7 @@ class AudioGroupChat(GroupChat):
         # Default model for unassigned agents
         self.default_tts_model = get_tts_model("kokoro")
         print("Default TTS model initialized")
-        
+
         # Assign voices to initial agents
         if agents:
             for agent in agents:
@@ -112,26 +71,26 @@ class AudioGroupChat(GroupChat):
                 self.tts_models[agent.name] = get_tts_model("kokoro")
                 self.voice_options[agent.name] = voice_options  # Store voice options
                 self.next_voice_index += 1
-                
+
         self.tts_sample_rate = 24000  # Standard sample rate for TTS output
-        
+
         print("Initializing STT model...")
         self.stt_model = get_stt_model()
         print("STT model initialized")
-        
+
         # Configure WebRTC settings
         self.rtc_config = get_twilio_turn_credentials() if os.environ.get("TWILIO_ACCOUNT_SID") else None
-        
+
         # Create FastRTC stream for audio handling with ReplyOnPause
         algo_options = AlgoOptions(
             audio_chunk_duration=1.0,  # Longer chunks for better transcription
             started_talking_threshold=0.2,  # More sensitive to speech start
             speech_threshold=0.1,  # More sensitive to ongoing speech
         )
-        
+
         # Create a handler that maintains state per participant
         self.participant_states = {}
-        
+
         # Create main handler for audio processing
         async def audio_callback(frame, additional_inputs=None):
             try:
@@ -142,13 +101,13 @@ class AudioGroupChat(GroupChat):
                         user_id = additional_inputs[0]
                     elif hasattr(additional_inputs[0], 'value'):
                         user_id = additional_inputs[0].value
-                    
+
                 if not user_id:
                     print("No user ID provided in audio callback")
                     return None
-                    
+
                 print(f"Processing audio from user: {user_id}")
-                    
+
                 # Handle different audio input formats
                 if isinstance(frame, tuple) and len(frame) == 2:
                     sample_rate, audio_array = frame
@@ -162,66 +121,68 @@ class AudioGroupChat(GroupChat):
                 else:
                     print(f"Unexpected audio format: {type(frame)}")
                     return None
-                    
+
                 print(f"Processing audio: sr={sample_rate}, shape={getattr(audio_array, 'shape', None)}")
-                    
+
                 # Ensure audio data is in correct format
                 if isinstance(audio_array, bytes):
                     audio_array = np.frombuffer(audio_array, dtype=np.float32)
                 elif isinstance(audio_array, list):
                     audio_array = np.array(audio_array, dtype=np.float32)
-            
+
                 # Convert to mono if stereo
                 if len(audio_array.shape) > 1:
                     audio_array = np.mean(audio_array, axis=1)
-            
+
                 # Ensure 1D array
                 audio_array = audio_array.reshape(-1)
-            
+
                 # Normalize audio to [-1, 1] range
                 if audio_array.dtype != np.float32:
                     audio_array = audio_array.astype(np.float32)
                 if np.max(np.abs(audio_array)) > 1.0:
                     audio_array = audio_array / 32768.0
-                
+
                 # Process complete utterance
                 text = self.stt_model.stt((sample_rate, audio_array))
                 if not text:
                     print("No speech detected")
                     return None
-                    
+
                 print(f"Transcribed text: {text}")
-                
+
                 # Create chat message
                 message = {
                     "role": "user",
                     "content": text,
                     "name": user_id
                 }
-                
-                # Add to chat history
+
+                # Add to chat history - directly append here for immediate visibility
+                self.messages.append(message)
+                self._last_message_count = len(self.messages) # Update last message count immediately
+
+                # Add to text queue
                 await self.text_queue.put({
                     "type": "chat",
                     "text": text,
                     "sender": user_id,
                     "channel": "voice"
                 })
-                
-                # Add message to messages list for UI updates
-                self.messages.append(message)
-                
+
+
                 # Process the message through the chat handler
                 await self._handle_chat_message(user_id, message)
-                
+
                 # Return messages for Gradio Chatbot
                 return self.messages
-                
+
             except Exception as e:
                 print(f"Error in audio callback: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 return None
-            
+
         # Create main handler using FastRTC's ReplyOnPause
         handler = ReplyOnPause(
             fn=audio_callback,
@@ -232,7 +193,7 @@ class AudioGroupChat(GroupChat):
             output_frame_size=480,  # Standard frame size for 24kHz
             input_sample_rate=48000,
         )
-        
+
         # Initialize handler with required attributes
         handler._loop = asyncio.get_event_loop()
         handler.queue = asyncio.Queue()
@@ -247,7 +208,7 @@ class AudioGroupChat(GroupChat):
             while not handler.queue.empty():
                 handler.queue.get_nowait()
         handler._clear_queue = clear_queue
-        
+
         # Create FastRTC stream for audio handling
         self.stream = FastRTCStream(
             modality="audio",
@@ -267,15 +228,15 @@ class AudioGroupChat(GroupChat):
                 "show_text": True
             }
         )
-        
+
         # Verify handler is properly set
         if not self.stream.event_handler:
             raise RuntimeError("Failed to initialize stream event_handler")
-        
+
         # Initialize participant tracking
         self.human_participants = {}
         self.active_calls = {}
-        
+
         # Initialize monitoring metrics
         self.monitor_iterations = 0
         self.last_monitor_active = time.time()
@@ -285,43 +246,23 @@ class AudioGroupChat(GroupChat):
         self.voice_enabled = True  # Enable voice by default
         self.text_enabled = True   # Enable text by default
         self.agent_voice_enabled = True  # Enable agent voice by default
-        
+
         # Track last message count to detect new messages
         self._last_message_count = 0
-        
+
         # Required for autogen compatibility
         self.client_cache = []
         self.previous_cache = []
-        
+
         # Message queues for each channel: Initialize queues
         self.voice_queue = asyncio.Queue()
         self.text_queue = asyncio.Queue()
-        
+
     async def initialize(self):
-        """Initialize async tasks and processors for real-time operation.
-        
-        This method sets up the core processing components:
-        1. Task Creation: Start background processors
-        2. Queue Setup: Initialize message queues
-        3. Error Handling: Configure error callbacks
-        4. State Management: Initialize tracking
-        
-        Components:
-        - Voice Queue Processor: Handle audio messages
-        - Text Queue Processor: Handle text messages
-        - Agent Monitor: Track agent interactions
-        - Error Handler: Manage task failures
-        
-        Processing Flow:
-        1. Create async tasks
-        2. Set error handlers
-        3. Start processors
-        4. Initialize state
-        5. Begin monitoring
-        """
+        """Initialize async tasks and processors for real-time operation."""
         try:
             self.logger.info("=== Initializing Audio Group Chat ===")
-            
+
             # Get event loop info
             loop = asyncio.get_event_loop()
             self.logger.info(f"Event loop details:")
@@ -329,7 +270,7 @@ class AudioGroupChat(GroupChat):
             self.logger.info(f"- Loop closed: {loop.is_closed()}")
             self.logger.info(f"- Loop debug enabled: {loop.get_debug()}")
             self.logger.info(f"- Loop thread ID: {threading.get_ident()}")
-            
+
             # Start monitor task first
             self.logger.info("=== Creating Monitor Task ===")
             try:
@@ -340,11 +281,11 @@ class AudioGroupChat(GroupChat):
                 self.logger.info("Adding error handler...")
                 self._monitor_agent_messages_task.add_done_callback(self._task_error_handler)
                 self.logger.info("Monitor task setup complete")
-                
+
                 # Give monitor a moment to start
                 print("\n=== Waiting for Monitor Task to Start ===\n")
                 await asyncio.sleep(1.0)  # Increased delay to ensure monitor starts
-                
+
                 # Verify monitor task is running
                 print("\n=== Verifying Monitor Task ===\n")
                 if self._monitor_agent_messages_task.done():
@@ -355,38 +296,38 @@ class AudioGroupChat(GroupChat):
                     print("Monitor task completed unexpectedly")
                     raise RuntimeError("Monitor task completed unexpectedly")
                 print("Monitor task running successfully")
-                
+
             except Exception as e:
                 print(f"Error setting up monitor task: {e}")
                 import traceback
                 traceback.print_exc()
                 raise
-            
+
             # Only start other tasks after monitor is confirmed running
             print("\n=== Starting Other Tasks ===\n")
-            
+
             print("Creating voice queue task...")
             self._process_voice_queue_task = asyncio.create_task(self._process_voice_queue())
             self._process_voice_queue_task.set_name("voice_queue")
             self._process_voice_queue_task.add_done_callback(self._task_error_handler)
-            
+
             print("Starting text queue task...")
             self._process_text_queue_task = asyncio.create_task(self._process_text_queue())
             self._process_text_queue_task.set_name("text_queue")
             self._process_text_queue_task.add_done_callback(self._task_error_handler)
-            
+
 
             # Give monitor a moment to start
             print("\n=== Waiting for Monitor Task ===\n")
             await asyncio.sleep(0.5)
-            
+
             # Check if monitor started successfully
             print("\n=== Checking Monitor Task Status ===\n")
             print(f"Monitor task: {self._monitor_agent_messages_task}")
             print(f"Monitor task name: {self._monitor_agent_messages_task.get_name()}")
             print(f"Monitor task done: {self._monitor_agent_messages_task.done()}")
             print(f"Monitor task cancelled: {self._monitor_agent_messages_task.cancelled()}")
-            
+
             if self._monitor_agent_messages_task.done():
                 exc = self._monitor_agent_messages_task.exception()
                 if exc:
@@ -401,12 +342,12 @@ class AudioGroupChat(GroupChat):
             else:
                 print("\n=== Monitor Task Running ===\n")
                 print("Monitor task started successfully")
-                
+
             print("\n=== All Tasks Created ===\n")
-            
+
             # Wait for tasks to start
             await asyncio.sleep(0.5)
-            
+
             # Verify all tasks are running
             for task in [self._monitor_agent_messages_task, self._process_voice_queue_task, self._process_text_queue_task]:
                 if task.done():
@@ -416,43 +357,17 @@ class AudioGroupChat(GroupChat):
                         raise exc
                 else:
                     print(f"Task {task.get_name()} is running")
-                
+
             print("Audio group chat initialized successfully")
-            
+
         except Exception as e:
             print(f"Error initializing audio group chat: {e}")
             import traceback
             traceback.print_exc()
             raise
-            
+
     def _task_error_handler(self, task):
-        """Handle errors in real-time processing tasks.
-        
-        This method implements error handling:
-        1. Error Detection: Task monitoring
-        2. Error Recovery: State restoration
-        3. Task Management: Cleanup/restart
-        4. Logging: Error tracking
-        
-        Error Types:
-        - Task failures
-        - Queue errors
-        - Connection issues
-        - Resource problems
-        
-        Args:
-            task (asyncio.Task): Failed task with:
-                - Exception info
-                - Stack trace
-                - State data
-        
-        Recovery Flow:
-        1. Detect error
-        2. Log details
-        3. Clean resources
-        4. Restore state
-        5. Restart if needed
-        """
+        """Handle errors in real-time processing tasks."""
         try:
             print(f"\n=== Task Error Handler: {task.get_name()} ===\n")
             print(f"Task details:")
@@ -460,12 +375,12 @@ class AudioGroupChat(GroupChat):
             print(f"- Done: {task.done()}")
             print(f"- Cancelled: {task.cancelled()}")
             print(f"- Task object: {task}")
-            
+
             # Skip if task was cancelled normally
             if task.cancelled():
                 print(f"\nTask {task.get_name()} was cancelled normally")
                 return
-                
+
             # Get the exception if any
             exc = task.exception()
             if exc:
@@ -477,14 +392,14 @@ class AudioGroupChat(GroupChat):
                 print("\nTraceback:")
                 import traceback
                 traceback.print_exc()
-                
+
                 # For critical tasks, raise the error to prevent silent failures
                 if task in [self._process_voice_queue_task, self._process_text_queue_task, self._monitor_agent_messages_task]:
                     print(f"\nCritical task '{task_name}' failed - raising error")
                     raise exc
             else:
                 print(f"Task {task.get_name()} completed without error")
-                    
+
         except asyncio.CancelledError:
             print(f"\nTask {task.get_name()} cancelled")
             # Re-raise cancellation to ensure proper cleanup
@@ -499,7 +414,7 @@ class AudioGroupChat(GroupChat):
             traceback.print_exc()
             # Re-raise to ensure errors are not silently swallowed
             raise
-            
+
     def add_agent(self, agent: Agent):
         """Add an agent to the chat and assign it a unique voice."""
         # Skip voice assignment for human users
@@ -510,12 +425,12 @@ class AudioGroupChat(GroupChat):
                 self.agents = []
             self.agents.append(agent)
             return
-            
+
         # Add agent to group chat
         if not hasattr(self, 'agents'):
             self.agents = []
         self.agents.append(agent)
-        
+
         # Assign a unique voice to the agent if not already assigned
         if agent.name not in self.tts_models:
             voice_name, voice_options = self.available_voices[self.next_voice_index % len(self.available_voices)]
@@ -524,29 +439,22 @@ class AudioGroupChat(GroupChat):
             self.voice_options[agent.name] = voice_options  # Store voice options
             self.next_voice_index += 1
         return agent
-        
+
     def add_human_participant(self, user_id: str) -> str:
-        """Add a human participant to the group chat.
-        
-        Args:
-            user_id: ID for the new participant
-            
-        Returns:
-            str: Session ID for the participant
-        """
+        """Add a human participant to the group chat."""
         print(f"\nAdding human participant: {user_id}")
-        
+
         try:
             # Create session ID
             session_id = str(random.getrandbits(64))
-            
+
             # Create user proxy agent
             user_agent = UserProxyAgent(
                 name=user_id,
                 human_input_mode="NEVER",
                 code_execution_config={"use_docker": False}
             )
-            
+
             # Add participant info
             self.human_participants[user_id] = {
                 "session_id": session_id,
@@ -554,16 +462,16 @@ class AudioGroupChat(GroupChat):
                 "active": False,
                 "stream": None
             }
-            
+
             # Add agent to chat
             if user_agent not in self.agents:
                 self.agents.append(user_agent)
-            
+
             print(f"Participant {user_id} added successfully")
             print("Current participants:", list(self.human_participants.keys()))
-            
+
             return session_id
-            
+
         except Exception as e:
             print(f"Error adding participant {user_id}: {e}")
             import traceback
@@ -571,11 +479,7 @@ class AudioGroupChat(GroupChat):
             raise
 
     async def start_audio_session(self, user_id: str):
-        """Start an audio session for a participant and initialize the group chat.
-        
-        Args:
-            user_id: ID of the participant to start session for
-        """
+        """Start an audio session for a participant and initialize the group chat."""
         try:
             # Verify participant exists
             participant = self.human_participants.get(user_id)
@@ -583,19 +487,19 @@ class AudioGroupChat(GroupChat):
                 print(f"Error: Participant {user_id} not found")
                 print("Available participants:", list(self.human_participants.keys()))
                 return
-            
+
             print(f"\nStarting audio session for {user_id}...")
-            
+
             # Mark participant as active
             participant["active"] = True
-            
+
             # Use the main AudioGroupChat stream for this participant
             if "stream" not in participant:
                 participant["stream"] = self.stream
                 print(f"Using main stream for participant {user_id}")
-                
+
             print(f"Audio session started for {user_id}")
-            
+
         except Exception as e:
             print(f"Error in start_audio_session: {e}")
             import traceback
@@ -603,44 +507,13 @@ class AudioGroupChat(GroupChat):
             raise
 
     async def _handle_audio_input(self, audio_data: tuple[int, np.ndarray], user_id: str = None) -> dict:
-        """Process incoming audio from a user in real-time.
-        
-        This method implements the audio input pipeline:
-        1. Audio Validation: Check format and content
-        2. Speech Detection: Convert to text
-        3. Message Creation: Format for chat
-        4. Queue Management: Add to processing queues
-        
-        Real-time Features:
-        - Immediate processing
-        - Format validation
-        - Error handling
-        - Queue integration
-        
-        Args:
-            user_id (str): ID of the user sending audio
-            audio_data (tuple[int, np.ndarray]): Audio containing:
-                - Sample rate (int)
-                - Audio data (numpy.ndarray)
-        
-        Returns:
-            dict: Response with:
-                - text: Transcribed text
-                - Additional metadata
-        
-        Processing Flow:
-        1. Validate audio format
-        2. Convert to text
-        3. Create message
-        4. Add to queues
-        5. Return response
-        """
+        """Process incoming audio from a user in real-time."""
         try:
             print("Received audio input:", type(audio_data))
             if audio_data is None:
                 print("No audio data received")
                 return None
-                
+
             # Handle different audio input formats
             if isinstance(audio_data, tuple) and len(audio_data) == 2:
                 sample_rate, audio_array = audio_data
@@ -654,39 +527,39 @@ class AudioGroupChat(GroupChat):
             else:
                 print(f"Unexpected audio format: {type(audio_data)}")
                 return None
-                
+
             print(f"Processing audio: sr={sample_rate}, shape={getattr(audio_array, 'shape', None)}")
-            
+
             # Ensure audio data is in correct format
             if isinstance(audio_array, bytes):
                 audio_array = np.frombuffer(audio_array, dtype=np.float32)
             elif isinstance(audio_array, list):
                 audio_array = np.array(audio_array, dtype=np.float32)
-            
+
             # Convert to mono if stereo
             if len(audio_array.shape) > 1:
                 audio_array = np.mean(audio_array, axis=1)
-            
+
             # Ensure 1D array (sequence_length,)
             audio_array = audio_array.reshape(-1)
-            
+
             # Normalize audio to [-1, 1] range
             if audio_array.dtype != np.float32:
                 audio_array = audio_array.astype(np.float32)
             if np.max(np.abs(audio_array)) > 1.0:
                 audio_array = audio_array / 32768.0
-                
+
             print("Audio preprocessing complete")
-            
+
             # Get participant's state
             participant = self.human_participants.get(user_id)
             if not participant:
                 print(f"No participant found for user_id: {user_id}")
                 return None
-                
+
             # Use STT model to convert accumulated speech to text
             text = self.stt_model.stt((sample_rate, audio_array))
-            
+
             if text and text.strip():
                 # Create message for processing
                 message = {
@@ -695,73 +568,38 @@ class AudioGroupChat(GroupChat):
                     "sender": user_id,
                     "channel": "voice"
                 }
-                
+
                 print(f"Transcribed text: {text}")
-                
+
                 # Process the message through the group chat manager
                 await self._handle_chat_message(user_id, message)
-                
+
                 return {"text": text}
             else:
                 print("No text transcribed from audio")
-            
+
             return None
-            
+
         except Exception as e:
             print(f"Error in audio input handler: {e}")
             import traceback
             traceback.print_exc()
             return None
-    
+
     async def handle_audio_output(self):
-        """Process and return the next audio output for real-time playback.
-        
-        This method implements a non-blocking audio output processor that:
-        1. Checks the voice queue for pending messages
-        2. Processes text-to-speech conversion
-        3. Formats audio data for playback
-        4. Broadcasts audio to all participants
-        
-        The audio processing pipeline ensures:
-        - Immediate processing of new messages
-        - Proper audio data formatting
-        - Real-time broadcasting to participants
-        - Error handling and recovery
-        
-        Audio Format Specifications:
-        - Sample Rate: 24kHz (standard for TTS output)
-        - Data Type: 32-bit float
-        - Amplitude Range: [-1.0, 1.0]
-        - Channel Layout: Mono
-        
-        Returns:
-            numpy.ndarray: Processed audio data ready for playback, or None if no audio
-        
-        Audio Processing Steps:
-        1. Get message from voice queue
-        2. Extract text content
-        3. Convert text to speech
-        4. Format audio data
-        5. Broadcast to participants
-        6. Return for UI playback
-        """
-        """Get the next audio output for Gradio UI.
-        
-        Returns:
-            numpy.ndarray: Audio data array for Gradio audio output, or None if no audio
-        """
+        """Process and return the next audio output for real-time playback."""
         try:
             # Check the voice queue
             try:
                 # Get next message from voice queue without blocking
                 message = self.voice_queue.get_nowait()
                 print(f"Processing voice queue message: {message}")
-                
+
                 if isinstance(message, dict):
                     if message.get("type") == "chat":
                         text = message.get("text")
                         sender = message.get("sender")
-                        
+
                         if text and sender and sender not in self.human_participants:
                             print(f"Converting to speech from voice queue: {text} from {sender}")
                             try:
@@ -772,19 +610,19 @@ class AudioGroupChat(GroupChat):
                                     text = text.get("content", "")
                                 elif isinstance(text, str):
                                     text = text
-                                    
+
                                 # Skip empty messages
                                 if not text or not text.strip():
                                     print("Empty text content, skipping")
                                     return None
-                                
+
                                 # Convert to speech with timeout
                                 tts_result = self.tts_models.get(sender, self.default_tts_model).tts(text, options=self.voice_options.get(sender, None))
                                 if asyncio.iscoroutine(tts_result):
                                     sample_rate, audio_data = await asyncio.wait_for(tts_result, timeout=5.0)
                                 else:
                                     sample_rate, audio_data = tts_result
-                                
+
                                 if audio_data is not None:
                                     # Ensure correct format
                                     if audio_data.dtype != np.float32:
@@ -793,17 +631,17 @@ class AudioGroupChat(GroupChat):
                                     max_val = np.max(np.abs(audio_data))
                                     if max_val > 0:  # Avoid division by zero
                                         audio_data = audio_data / max_val
-                                    
+
                                     print(f"Broadcasting TTS audio for {sender}: {text}")
                                     print(f"Audio stats - min: {np.min(audio_data):.3f}, max: {np.max(audio_data):.3f}, mean: {np.mean(audio_data):.3f}")
-                                    
+
                                     # Broadcast to all participants
                                     await self._broadcast_audio_to_participants((sample_rate, audio_data))
                                     # Return for Gradio UI
                                     return audio_data
                                 else:
                                     print(f"TTS failed for message from {sender}: {text}")
-                                    
+
                             except asyncio.TimeoutError:
                                 print(f"TTS timed out for message: {text}")
                             except Exception as e:
@@ -817,9 +655,9 @@ class AudioGroupChat(GroupChat):
                             return audio_data
             except asyncio.QueueEmpty:
                 pass
-                
+
             return None
-                
+
         except Exception as e:
             print(f"Error in audio output handler: {e}")
             import traceback
@@ -827,50 +665,7 @@ class AudioGroupChat(GroupChat):
             return None
 
     async def text_to_speech(self, text: str | dict, user_id: str = None) -> tuple[int, np.ndarray] | None:
-        """Convert text to speech with real-time processing and delivery.
-        
-        This method handles the text-to-speech conversion pipeline:
-        1. Text content extraction
-        2. TTS conversion with timeout protection
-        3. Audio data formatting
-        4. Broadcasting to participants
-        
-        The TTS process is optimized for real-time chat:
-        - Asynchronous processing with timeouts
-        - Automatic format conversion
-        - Direct broadcasting capability
-        - Error handling and recovery
-        
-        Args:
-            text (str | dict): Text to convert or message dict with 'content'
-            user_id (str, optional): Target participant for direct sending
-        
-        Returns:
-            tuple[int, np.ndarray] | None: Tuple of (sample_rate, audio_data) if successful
-        
-        Audio Specifications:
-        - Sample Rate: 24kHz
-        - Format: 32-bit float
-        - Range: [-1.0, 1.0]
-        - Layout: Mono
-        
-        Processing Steps:
-        1. Extract text content
-        2. Skip empty messages
-        3. Convert to speech (with timeout)
-        4. Format audio data
-        5. Add to voice queue
-        6. Return audio data
-        """
-        """Convert text to speech and send it to participants.
-        
-        Args:
-            text: Text to convert to speech or chat result dict
-            user_id: Optional target user ID. If None, broadcast to all
-            
-        Returns:
-            tuple: A tuple of (sample_rate, audio_data) if successful, None otherwise
-        """
+        """Convert text to speech with real-time processing and delivery."""
         try:
             # Check if TTS is enabled and model is initialized
             if not hasattr(self, 'tts_models') or not self.tts_models:
@@ -882,22 +677,22 @@ class AudioGroupChat(GroupChat):
                 text = text.get("content", "")
             elif not isinstance(text, str):
                 text = str(text)
-            
+
             # Skip empty messages
             if not text or text.strip() == "":
                 return None
-            
+
             # Extract sender from chat result if needed
             if isinstance(text, dict):
                 sender = text.get("sender", user_id)
             else:
                 sender = user_id or ""
-                
+
             # Skip TTS for human participants
             if sender in self.human_participants:
                 print(f"Skipping TTS for human participant {sender}")
                 return None
-                
+
             # Get the appropriate TTS model and voice options for the sender
             tts_model = self.tts_models.get(sender, self.default_tts_model)
             voice_options = self.voice_options.get(sender, None)
@@ -910,7 +705,7 @@ class AudioGroupChat(GroupChat):
             # Run TTS conversion in a separate thread to avoid blocking the event loop
             sample_rate, audio_data = await asyncio.to_thread(sync_tts)
             print(f"TTS generated audio: sr={sample_rate}, shape={audio_data.shape}")
-                
+
             if audio_data is None:
                 print("TTS failed to generate audio")
                 return None
@@ -933,7 +728,7 @@ class AudioGroupChat(GroupChat):
             audio_data = np.clip(audio_data, -1.0, 1.0)
             audio_data = (audio_data * 32767).astype(np.int16)  # Convert to 16-bit integers
 
-                
+
             # Add to voice queue for broadcasting
             await self.voice_queue.put({
                 "type": "audio",
@@ -941,10 +736,10 @@ class AudioGroupChat(GroupChat):
                 "audio_data": audio_data,
                 "sender": sender
             })
-                
-            print(f"Added TTS audio to voice queue: {text}")  
+
+            print(f"Added TTS audio to voice queue: {text}")
             return sample_rate, audio_data
-            
+
         except Exception as e:
             print(f"Error in text_to_speech: {e}")
             import traceback
@@ -952,34 +747,25 @@ class AudioGroupChat(GroupChat):
             return None
 
     async def _send_audio_to_participant(self, user_id: str, audio_frame: tuple[int, np.ndarray], max_retries: int = 3) -> bool:
-        """Send audio data to a specific participant.
-        
-        Args:
-            user_id: Target participant ID
-            audio_frame: Tuple of (sample_rate, audio_data)
-            max_retries: Maximum number of retry attempts
-            
-        Returns:
-            bool: True if sent successfully, False otherwise
-        """
+        """Send audio data to a specific participant."""
         participant = self.human_participants.get(user_id)
         if not participant or not participant.get("active"):
             print(f"Participant {user_id} not found or not active")
             return False
-            
+
         stream = participant.get("stream")
         if not stream:
             print(f"No stream found for participant {user_id}")
             return False
-            
+
         sample_rate, audio_data = audio_frame
-        
+
         # Ensure audio data is in correct format
         if audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
         if np.max(np.abs(audio_data)) > 1.0:
             audio_data = audio_data / 32768.0
-            
+
         for attempt in range(max_retries):
             try:
                 print(f"Sending audio to {user_id} (attempt {attempt + 1})")
@@ -992,41 +778,33 @@ class AudioGroupChat(GroupChat):
                     await send_audio()
                     print(f"Successfully sent audio stream to {user_id}")
                     return True
-                        
+
             except Exception as e:
                 print(f"Error sending audio to {user_id} (attempt {attempt + 1}): {e}")
                 import traceback
                 traceback.print_exc()
                 await asyncio.sleep(0.5)  # Brief delay before retry
-                
+
         return False
 
     async def broadcast_audio(self, audio_frame: tuple[int, np.ndarray], sender_id: str = None):
-        """Broadcast audio to all participants except the sender.
-        
-        Args:
-            audio_frame: Tuple of (sample_rate, audio_data)
-            sender_id: Optional ID of the sender to exclude from broadcast
-            
-        Returns:
-            bool: True if at least one participant received the audio successfully
-        """
+        """Broadcast audio to all participants except the sender."""
         print("\n=== Broadcasting Audio ===")
         sample_rate, audio_data = audio_frame
         print(f"Audio frame: sr={sample_rate}Hz, shape={audio_data.shape}, dtype={audio_data.dtype}")
-        
+
         # Get list of active participants excluding sender
         participants = [
             user_id for user_id, participant in self.human_participants.items()
             if user_id != sender_id and participant.get("active") and participant.get("stream") is not None
         ]
-        
+
         if not participants:
             print("No active participants with streams to broadcast to")
             return False
-            
+
         print(f"Broadcasting to participants: {participants}")
-        
+
         # Ensure audio data is in correct format
         if audio_data.dtype == np.int16:
             pass  # Already in correct format (no scaling needed)
@@ -1035,8 +813,8 @@ class AudioGroupChat(GroupChat):
                 audio_data = audio_data.astype(np.float32)
             if np.max(np.abs(audio_data)) > 1.0:
                 audio_data = audio_data / 32768.0  # Only for non-integer data
-        
-            
+
+
         # Add to voice queue for local playback (if not already added)
         #await self.voice_queue.put({
         #    "type": "audio",
@@ -1044,7 +822,7 @@ class AudioGroupChat(GroupChat):
         #    "audio_data": audio_data,
         #    "sender": sender_id
         #})
-            
+
         # Send to all participants in parallel
         tasks = []
         for user_id in participants:
@@ -1060,15 +838,15 @@ class AudioGroupChat(GroupChat):
                 print(f"Error preparing to send to {user_id}: {e}")
                 import traceback
                 traceback.print_exc()
-        
+
         if not tasks:
             print("No tasks created for broadcasting")
             return False
-            
+
         # Wait for all sends to complete
         print(f"Sending audio to {len(tasks)} participants...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Check for any failures
         success = False
         for user_id, result in zip(participants, results):
@@ -1079,21 +857,16 @@ class AudioGroupChat(GroupChat):
             else:
                 success = True
                 print(f"Successfully sent audio to {user_id}")
-        
+
         if success:
             print("Successfully broadcasted audio to at least one participant")
         else:
             print("Failed to broadcast audio to any participants")
-            
+
         return success
 
     async def _handle_chat_message(self, user_id: str, msg: Dict[str, Any]) -> None:
-        """Handle incoming chat messages.
-        
-        Args:
-            user_id: ID of the participant sending the message
-            msg: Message dictionary
-        """
+        """Handle incoming chat messages."""
         try:
             if msg.get("type") == "chat" and msg.get("text"):
                 # Create task to handle message asynchronously
@@ -1102,67 +875,32 @@ class AudioGroupChat(GroupChat):
             print(f"Error handling chat message: {e}")
             import traceback
             traceback.print_exc()
-    
+
     async def _process_chat_message(self, user_id: str, message: Dict[str, Any]) -> None:
-        """Process chat messages and handle responses in real-time.
-        
-        This method implements the core message processing pipeline:
-        1. Content Extraction: Get text from various formats
-        2. Message Formatting: Create proper chat message
-        3. History Updates: Add to chat history
-        4. Voice Processing: Queue agent messages for TTS
-        5. Response Generation: Get and process agent responses
-        
-        Real-time Optimizations:
-        - Immediate message processing
-        - Async response generation
-        - Direct voice queue integration
-        - Smart message routing
-        
-        Args:
-            user_id (str): Participant ID sending the message
-            message (Dict[str, Any]): Message containing:
-                - content/text: Message text
-                - type: Usually 'chat'
-                - sender: Message sender ID
-                - Additional metadata
-        
-        Flow:
-        1. Extract text content
-        2. Create chat message
-        3. Update UI history
-        4. Process agent messages
-        5. Generate responses
-        6. Queue for voice output
-        
-        Voice Processing:
-        - Human messages are processed directly
-        - Agent responses are queued for TTS
-        - Messages are broadcast to all participants
-        """
+        """Process chat messages and handle responses in real-time."""
         try:
             print("\n=== Processing Chat Message ===")
             print(f"From User: {user_id}")
             print(f"Message: {message}")
-            
+
             # Get message content
             text = None
             if isinstance(message, dict):
                 text = message.get("content", message.get("text", ""))
             elif hasattr(message, 'content'):  # Handle ChatResult objects
                 text = message.content
-            
+
             if not text or not text.strip():
                 print("Empty message, skipping")
                 return
-                
+
             # Create chat message
             chat_message = {
                 "role": "user" if user_id in self.human_participants else "assistant",
                 "content": text,
                 "name": user_id
             }
-            
+
             # Add to voice queue if it's an agent message and voice is enabled
             if user_id not in self.human_participants and self.agent_voice_enabled:
                 await self.voice_queue.put({
@@ -1173,11 +911,11 @@ class AudioGroupChat(GroupChat):
                 })
                 print(f"Added agent message to voice queue: {text[:100]}..." if len(text) > 100 else f"Added agent message to voice queue: {text}")
                 chat_message["_voice_queued"] = True  # Use dict entry instead of attribute
-            
+
             # Add message to messages list for UI updates
             #print(f"Adding message to chat history: {chat_message}")
             #self.messages.append(chat_message)
-            
+
             # Add message to both queues to ensure it's displayed and spoken
             message_for_queues = {
                 "type": "chat",
@@ -1185,11 +923,11 @@ class AudioGroupChat(GroupChat):
                 "sender": user_id,
                 "channel": "both"
             }
-            
+
             # Always add to text queue for display
             await self.text_queue.put(message_for_queues)
             print(f"Added message to text queue: {text[:100]}..." if len(text) > 100 else f"Added message to text queue: {text}")
-            
+
             # Get the first available agent as recipient
             recipient = next((agent for agent in self.agents if agent.name != user_id), None)
             if recipient:
@@ -1202,7 +940,7 @@ class AudioGroupChat(GroupChat):
                         sender=sender,
                         recipient=recipient
                     )
-                    
+
                     # Process response if any
                     if response:
                         # Extract latest message from ChatResult
@@ -1218,27 +956,27 @@ class AudioGroupChat(GroupChat):
                             response_text = response.get('content', '')
                         else:
                             response_text = str(response)
-                        
+
                         response_msg = {
                             "role": "assistant",
                             "content": response_text,
                             "name": recipient.name
                         }
                         self.messages.append(response_msg)
-                        
+
                         # Create base message
                         base_message = {
                             "type": "chat",
                             "text": response_text,
                             "sender": recipient.name
                         }
-                        
+
                         # Add to text queue
                         text_message = base_message.copy()
                         text_message["channel"] = "text"
                         await self.text_queue.put(text_message)
                         print(f"Added agent response to text queue: {response_text[:100]}..." if len(response_text) > 100 else f"Added agent response to text queue: {response_text}")
-                        
+
                         # Add to voice queue if agent voice is enabled
                         if self.agent_voice_enabled:
                             voice_message = base_message.copy()
@@ -1248,154 +986,124 @@ class AudioGroupChat(GroupChat):
                             # Mark the original message and response as queued
                             message["_voice_queued"] = True
                             response_msg["_voice_queued"] = True
-                
+
         except Exception as e:
             print(f"Error processing chat message: {e}")
             import traceback
             traceback.print_exc()
-                
-    async def _monitor_agent_messages(self): 
+
+    async def _monitor_agent_messages(self):
         """Monitor and process new agent messages in real-time."""
         processed_messages = set()
-         
+
         while True:
             try:
                 # Start monitoring iteration
                 print("\n=== Monitoring Cycle Start ===")
-                
+
                 # Get current message count with lock
                 with self._lock:
                     current_count = len(self.messages)
                     print(f"Last message count: {self._last_message_count}")
                     print(f"Current message count: {current_count}")
-                    
+
                     # Always log the current state, even if no new messages
                     if current_count == self._last_message_count:
                         print("No new messages detected in this cycle")
-                    
+
                     # Check for new messages
                     elif current_count > self._last_message_count:
                         print(f"\n=== New Messages Detected ===")
                         print(f"Processing {current_count - self._last_message_count} new messages")
-                        
-                        # Process the latest message
-                        last_message = self.messages[-1]
-                        print(f"[monitor_agent_message] Processing latest message: {last_message}")
-                        
-                        # Extract text and sender
-                        text = None
-                        sender = None
-                        
-                        if isinstance(last_message, tuple):
-                            text = last_message[1]  # Agent's response is in second position
-                            sender = last_message[0].name if hasattr(last_message[0], 'name') else str(last_message[0])
-                        elif isinstance(last_message, dict):
-                            text = last_message.get('content', '')
-                            sender = last_message.get('name', '')
-                            
-                        print(f"\n=== Message Content Analysis ===")
-                        print(f"Extracted Content:")
-                        print(f"- Sender: {sender}")
-                        print(f"- Text: {text[:100]}..." if len(text) > 100 else f"- Text: {text}")
-                        
-                        # Only process if we have valid text and sender
-                        if text and isinstance(text, str) and text.strip() and sender:
-                            message_hash = hash(f"{sender}:{text}")
-                            print(f"Message hash: {message_hash}")
-                            
-                            # Check processing conditions
-                            is_agent = sender not in self.human_participants
-                            voice_enabled = self.agent_voice_enabled
-                            not_processed = message_hash not in processed_messages
-                            not_queued = not (isinstance(last_message, dict) and last_message.get("_voice_queued", False))
-                            
-                            print(f"\n=== Message Processing Analysis ===")
-                            print(f"Processing Conditions:")
-                            print(f"- Message Hash: {message_hash}")
-                            print(f"- Is Agent Message: {is_agent}")
-                            print(f"- Voice Enabled: {voice_enabled}")
-                            print(f"- Not Previously Processed: {not_processed}")
-                            print(f"- Not Already Queued: {not_queued}")
-                            
-                            # Process agent messages that haven't been processed
-                            if is_agent and voice_enabled and not_processed and not_queued:
-                                print(f"\n=== Processing New Agent Message ===")
-                                print(f"From: {sender}")
-                                print(f"Content: {text[:100]}..." if len(text) > 100 else f"Content: {text}")
-                                
-                                # Create message for voice queue
-                                message_for_queues = {
-                                    "type": "chat",
-                                    "text": text,
-                                    "sender": sender,
-                                    "channel": "voice"
-                                }
-                                print(f"Adding to voice queue: {text[:100]}..." if len(text) > 100 else f"Adding to voice queue: {text}")
-                                
-                                try:
-                                    # Add to voice queue with timeout
-                                    await asyncio.wait_for(
-                                        self.voice_queue.put(message_for_queues),
-                                        timeout=1.0
-                                    )
-                                    
-                                    # Mark original message as queued and track processed message
-                                    if isinstance(last_message, dict):
-                                        last_message["_voice_queued"] = True
-                                    processed_messages.add(message_hash)
-                                    
-                                except asyncio.TimeoutError:
-                                    print("Warning: Voice queue put timed out")
-                                except Exception as e:
-                                    print(f"Error queueing message: {e}")
-                        
-                        # Update last message count after processing
-                        self._last_message_count = current_count
-                    
+
+                        # Iterate through new messages, assuming messages are added in order
+                        for last_message in self.messages[self._last_message_count:]: # Iterate over the *new* messages
+                            print(f"[monitor_agent_message] Processing new message: {last_message}")
+
+                            # Extract text and sender
+                            text = None
+                            sender = None
+
+                            if isinstance(last_message, tuple):
+                                text = last_message[1]  # Agent's response is in second position
+                                sender = last_message[0].name if hasattr(last_message[0], 'name') else str(last_message[0])
+                            elif isinstance(last_message, dict):
+                                text = last_message.get('content', '')
+                                sender = last_message.get('name', '')
+
+                            print(f"\n=== Message Content Analysis ===")
+                            print(f"Extracted Content:")
+                            print(f"- Sender: {sender}")
+                            print(f"- Text: {text[:100]}..." if len(text) > 100 else f"- Text: {text}")
+
+                            # Only process if we have valid text and sender
+                            if text and isinstance(text, str) and text.strip() and sender:
+                                message_hash = hash(f"{sender}:{text}")
+                                print(f"Message hash: {message_hash}")
+
+                                # Check processing conditions
+                                is_agent = sender not in self.human_participants
+                                voice_enabled = self.agent_voice_enabled
+                                not_processed = message_hash not in processed_messages
+                                not_queued = not (isinstance(last_message, dict) and last_message.get("_voice_queued", False))
+
+                                print(f"\n=== Message Processing Analysis ===")
+                                print(f"Processing Conditions:")
+                                print(f"- Message Hash: {message_hash}")
+                                print(f"- Is Agent Message: {is_agent}")
+                                print(f"- Voice Enabled: {voice_enabled}")
+                                print(f"- Not Previously Processed: {not_processed}")
+                                print(f"- Not Already Queued: {not_queued}")
+
+                                # Process agent messages that haven't been processed
+                                if is_agent and voice_enabled and not_processed and not_queued:
+                                    print(f"\n=== Processing New Agent Message ===")
+                                    print(f"From: {sender}")
+                                    print(f"Content: {text[:100]}..." if len(text) > 100 else f"Content: {text}")
+
+                                    # Create message for voice queue
+                                    message_for_queues = {
+                                        "type": "chat",
+                                        "text": text,
+                                        "sender": sender,
+                                        "channel": "voice"
+                                    }
+                                    print(f"Adding to voice queue: {text[:100]}..." if len(text) > 100 else f"Adding to voice queue: {text}")
+
+                                    try:
+                                        # Add to voice queue with timeout
+                                        await asyncio.wait_for(
+                                            self.voice_queue.put(message_for_queues),
+                                            timeout=1.0
+                                        )
+
+                                        # Mark original message as queued and track processed message
+                                        if isinstance(last_message, dict):
+                                            last_message["_voice_queued"] = True
+                                        processed_messages.add(message_hash)
+
+                                    except asyncio.TimeoutError:
+                                        print("Warning: Voice queue put timed out")
+                                    except Exception as e:
+                                        print(f"Error queueing message: {e}")
+
+                    # Update last message count after processing - update here after processing new messages
+                    self._last_message_count = current_count
+
                     # Update monitoring metrics
                     self.monitor_iterations += 1
                     self.last_monitor_active = time.time()
-                
+
                 # Small delay between cycles to prevent tight looping
                 await asyncio.sleep(0.1)
-                
+
             except Exception as e:
                 print(f"Error in monitor loop: {e}")
                 traceback.print_exc()
                 await asyncio.sleep(1)
 
     async def _process_voice_queue(self):
-        """Process messages in the voice queue for real-time audio output.
-        
-        This method implements the voice processing pipeline:
-        1. Queue Monitoring: Check for new messages
-        2. Content Processing: Extract and validate text
-        3. TTS Conversion: Generate audio output
-        4. Broadcasting: Deliver to participants
-        
-        Real-time Features:
-        - Continuous processing
-        - Immediate conversion
-        - Direct broadcasting
-        - Error recovery
-        
-        Message Types:
-        1. Chat Messages:
-           - Contains text for TTS
-           - Includes sender info
-           - Specifies channel
-        2. Audio Messages:
-           - Contains raw audio
-           - Ready for broadcast
-        
-        Processing Flow:
-        1. Get queue message
-        2. Identify message type
-        3. Process accordingly
-        4. Generate audio
-        5. Broadcast output
-        6. Handle errors
-        """
+        """Process messages in the voice queue for real-time audio output."""
         while True:
             try:
                 # Get next message from voice queue
@@ -1405,13 +1113,13 @@ class AudioGroupChat(GroupChat):
                 print(f"Sender: {message.get('sender')}")
                 print(f"Channel: {message.get('channel')}")
                 print(f"Text content: {message.get('text', '')[:100]}..." if message.get('text') and len(message.get('text')) > 100 else f"Text content: {message.get('text', '')}")
-                
+
                 if isinstance(message, dict):
                     message_type = message.get("type")
                     sender = message.get("sender")
                     channel = message.get("channel")
                     text = message.get("text", "")
-                    
+
                     # Log message details
                     print(f"Message type: {message_type}")
                     print(f"Sender: {sender}")
@@ -1420,7 +1128,7 @@ class AudioGroupChat(GroupChat):
 
                     if message_type == "chat":
                         text = message.get("text")
-                        
+
                         # Only process messages from agents if voice is enabled
                         if text and sender and sender not in self.human_participants and self.agent_voice_enabled:
                             print(f"Converting to speech from voice queue: {text} from {sender}")
@@ -1437,19 +1145,19 @@ class AudioGroupChat(GroupChat):
                                     text = text
                                 else:
                                     text = str(text)
-                                    
+
                                 if text != original_text:
                                     print(f"Extracted text content: {text[:100]}..." if len(text) > 100 else f"Extracted text content: {text}")
-                                    
+
                                 # Skip empty messages
                                 if not text or not isinstance(text, str) or not text.strip():
                                     print(f"Skipping empty or invalid message from {sender}")
                                     continue
-                                    
+
                                 # Convert text to speech
                                 print(f"Converting to speech - Sender: {sender}, Text: {text[:100]}..." if len(text) > 100 else f"Converting to speech - Sender: {sender}, Text: {text}")
                                 audio_result = await self.text_to_speech(text, sender)
-                                
+
                                 if audio_result:
                                     # Broadcast audio to all participants
                                     print(f"Broadcasting audio from {sender}")
@@ -1465,7 +1173,7 @@ class AudioGroupChat(GroupChat):
                                 import traceback
                                 traceback.print_exc()
                                 continue
-                                
+
                     elif message_type == "audio":
                         # Handle raw audio data
                         audio_frame = message.get("audio_data")
@@ -1504,10 +1212,10 @@ class AudioGroupChat(GroupChat):
                         print(f"Unknown message type: {message_type} from {sender}")
                 else:
                     print(f"Invalid message format: {message}")
-                    
+
                 # Mark task as done
                 self.voice_queue.task_done()
-                    
+
             except asyncio.CancelledError:
                 # Allow clean shutdown
                 print("Voice queue processor cancelled")
@@ -1517,10 +1225,10 @@ class AudioGroupChat(GroupChat):
                 import traceback
                 traceback.print_exc()
                 continue
-                
+
             # Small delay to prevent tight loop
             await asyncio.sleep(0.1)
-                
+
     async def _process_text_queue(self):
         """Process messages in the text queue."""
         while True:
@@ -1528,11 +1236,11 @@ class AudioGroupChat(GroupChat):
                 # Get next message from text queue
                 message = await self.text_queue.get()
                 print(f"Processing text queue message: {message}")
-                
+
                 if isinstance(message, dict):
                     text = message.get("text", "")
                     sender = message.get("sender", "")
-                    
+
                     if text and sender:
                         # Process the message through the chat manager
                         await self._process_chat_message(sender, {
@@ -1540,10 +1248,10 @@ class AudioGroupChat(GroupChat):
                             "content": text,
                             "name": sender
                         })
-                
+
                 # Mark task as done
                 self.text_queue.task_done()
-                
+
             except Exception as e:
                 print(f"Error in text queue processor: {e}")
                 import traceback
@@ -1551,33 +1259,22 @@ class AudioGroupChat(GroupChat):
                 await asyncio.sleep(1)
 
     async def _broadcast_audio_to_participants(self, audio_frame: tuple[int, np.ndarray]):
-        """Broadcast audio to all active participants.
-        
-        Args:
-            audio_frame: Tuple of (sample_rate, audio_data)
-        """
+        """Broadcast audio to all active participants."""
         # This is now just a wrapper around broadcast_audio for backward compatibility
         return await self.broadcast_audio(audio_frame)
-                
+
     async def send_message(self, message: Dict[str, Any]) -> Optional[str]:
-        """Send a message and handle responses.
-        
-        Args:
-            message: Message dictionary containing content, sender, recipients, and channel
-            
-        Returns:
-            Optional response string from the group chat manager
-        """
+        """Send a message and handle responses."""
         try:
             print(f"Processing message from {message.get('sender', 'unknown')}")
-            
+
             # Add message to chat history
             self.messages.append({
                 "role": "user",
                 "content": message["content"],
                 "name": message["sender"]
             })
-            
+
             # Get response from group chat manager
             if hasattr(self, "manager"):
                 print(f"Getting response from group chat manager for {message['sender']}")
@@ -1585,12 +1282,12 @@ class AudioGroupChat(GroupChat):
                     content=message["content"],
                     sender=message["sender"],
                 )
-                
+
                 if response:
                     # Get the responding agent's name
                     agent_name = next((agent.name for agent in self.agents if agent != message["sender"]), "Assistant")
                     print(f"Got response from {agent_name}")
-                    
+
                     # Add response to chat history
                     self.messages.append({
                         "role": "assistant",
@@ -1598,7 +1295,7 @@ class AudioGroupChat(GroupChat):
                         "name": agent_name
                     })
                     print(f"Added response to chat history from {agent_name}")
-                    
+
                     # Add to text queue for UI updates
                     print(f"Adding response to text queue from {agent_name}")
                     await self.text_queue.put({
@@ -1607,13 +1304,13 @@ class AudioGroupChat(GroupChat):
                         "sender": agent_name,
                         "channel": "both"
                     })
-                    
+
                     # Convert to speech if agent voice is enabled
                     if self.agent_voice_enabled:
                         print(f"Converting response to speech for {agent_name}")
                         # Prefix with agent name for clarity
                         speech_text = f"{agent_name} says: {response}"
-                        
+
                         # Add to voice queue for speech synthesis
                         print(f"Adding response to voice queue from {agent_name}")
                         await self.voice_queue.put({
@@ -1622,90 +1319,55 @@ class AudioGroupChat(GroupChat):
                             "sender": agent_name,
                             "channel": "voice"
                         })
-                        
+
                         # Mark message as queued
                         self.messages[-1]["_voice_queued"] = True  # Use dict entry instead of attribute
                         print(f"Marked message as queued for {agent_name}")
                     else:
                         print(f"Agent voice is disabled, skipping speech synthesis for {agent_name}")
-                    
+
                     return response
                 else:
                     print(f"No response received from group chat manager for {message['sender']}")
             else:
                 print("No group chat manager available")
-            
+
             return None
-                
+
         except Exception as e:
             print(f"Error sending message: {e}")
             import traceback
             traceback.print_exc()
             return None
-            
+
     def agent(self, name_or_id: str) -> Optional[Agent]:
-        """Find an agent by name or ID.
-        
-        Args:
-            name_or_id: Name or ID of the agent to find
-            
-        Returns:
-            Agent if found, None otherwise
-        """
+        """Find an agent by name or ID."""
         if not name_or_id:
             return None
-        
+
         for agent in self.agents:
             if hasattr(agent, 'name') and agent.name == name_or_id:
                 return agent
         return None
 
     def _log_error(self, message: str) -> None:
-        """Log error messages.
-        
-        Args:
-            message: Error message to log
-        """
+        """Log error messages."""
         print(f"Error: {message}")
 
     def set_channel_config(self, voice_enabled: bool = None, text_enabled: bool = None, agent_voice_enabled: bool = None):
-        """Configure real-time communication channels.
-        
-        This method manages channel settings:
-        1. Voice Channel: Audio streaming
-        2. Text Channel: Message passing
-        3. Agent Voice: TTS responses
-        4. Channel States: Active tracking
-        
-        Configuration Options:
-        - Independent channel control
-        - Selective agent responses
-        - Real-time updates
-        - State persistence
-        
-        Args:
-            voice_enabled (bool, optional): Enable voice streaming
-            text_enabled (bool, optional): Enable text messages
-            agent_voice_enabled (bool, optional): Enable agent TTS
-        
-        Config Flow:
-        1. Update settings
-        2. Apply changes
-        3. Update state
-        4. Notify handlers
-        """
+        """Configure real-time communication channels."""
         if voice_enabled is not None:
             self.voice_enabled = voice_enabled
         if text_enabled is not None:
             self.text_enabled = text_enabled
         if agent_voice_enabled is not None:
             self.agent_voice_enabled = agent_voice_enabled
-            
+
     def append(self, message: dict[str, Any], speaker: Agent) -> None:
         """Override append to intercept messages before they are added to the chat."""
         print("\n=== GroupChat Message Appended ===")
         print(f"From: {speaker.name if speaker else 'Unknown'}")
-        
+
         # Extract content from message
         content = None
         if message and isinstance(message, dict):
@@ -1721,9 +1383,9 @@ class AudioGroupChat(GroupChat):
                 content = content.content
             elif not isinstance(content, str):
                 content = str(content)
-        
+
         print(f"Extracted content: {content[:100]}..." if content and len(content) > 100 else f"Extracted content: {content}")
-        
+
         # Add message to our queues for processing
         if content and isinstance(content, str) and content.strip():
             # Create base message
@@ -1732,18 +1394,18 @@ class AudioGroupChat(GroupChat):
                 "text": content,
                 "sender": speaker.name if speaker else "Unknown"
             }
-            with self._lock:    
+            with self._lock:
                 # Add to text queue for display
                 text_message = message_for_queues.copy()
                 text_message["channel"] = "text"
                 print("Adding message to text queue")
                 asyncio.create_task(self.text_queue.put(text_message))
-            
+
                 # Add to voice queue if this is an agent message and voice is enabled
-                if (speaker and 
+                if (speaker and
                     speaker.name not in self.human_participants and
                     self.agent_voice_enabled):
-                    
+
                     voice_message = message_for_queues.copy()
                     voice_message["channel"] = "voice"
                     print("Adding message to voice queue")
@@ -1754,7 +1416,7 @@ class AudioGroupChat(GroupChat):
                     print(f"Marked message as queued for {speaker.name}")
                 # Call parent class's append
                 super().append(message, speaker)
-                
+
                 # Update message count after append
                 self._last_message_count = len(self.messages)
             print(f"Updated message count to: {self._last_message_count}")
