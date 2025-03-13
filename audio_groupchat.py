@@ -23,10 +23,47 @@ import random
 from threading import Lock
 
 class AudioGroupChat(GroupChat):
-    """Real-time audio group chat implementation enabling voice and text communication between humans and AI agents."""
+    """Real-time audio group chat implementation enabling voice and text communication between humans and AI agents.
+    
+    This class extends the base GroupChat to add real-time audio processing capabilities, enabling:
+    - Two-way voice communication between humans and AI agents
+    - Text-to-Speech (TTS) for AI agent responses
+    - Speech-to-Text (STT) for human voice input
+    - WebRTC-based audio streaming
+    - Multiple voice personalities for different AI agents
+    
+    The chat supports both synchronous and asynchronous communication patterns and can
+    handle multiple participants in a group conversation setting.
+    
+    Attributes:
+        agent_voice_enabled (bool): Flag to enable/disable AI agent voice responses
+        tts_models (dict): Mapping of agent names to their TTS models
+        voice_options (dict): Voice configuration options for each agent
+        available_voices (list): List of predefined voice personalities
+        tts_sample_rate (int): Sample rate for TTS audio output
+        stt_model: Speech-to-text model instance
+        rtc_config: WebRTC configuration including TURN server settings
+        participant_states (dict): State tracking for each participant
+    """
 
     def __init__(self, agents=None, messages=None, max_round=10, speaker_selection_method="round_robin", allow_repeat_speaker=False):
-        """Initialize AudioGroupChat with audio processing capabilities."""
+        """Initialize AudioGroupChat with audio processing capabilities.
+        
+        Args:
+            agents (list, optional): List of AI agents to participate in the chat. Defaults to None.
+            messages (list, optional): Initial messages in the chat. Defaults to None.
+            max_round (int, optional): Maximum number of conversation rounds. Defaults to 10.
+            speaker_selection_method (str, optional): Method to select next speaker ("round_robin" or "random"). 
+                                                    Defaults to "round_robin".
+            allow_repeat_speaker (bool, optional): Whether to allow the same speaker multiple times in a row. 
+                                                 Defaults to False.
+        
+        The initialization process includes:
+        1. Setting up TTS models with different voice personalities
+        2. Initializing STT model for voice recognition
+        3. Configuring WebRTC for real-time audio streaming
+        4. Setting up audio processing handlers and state management
+        """
         super().__init__(
             agents=agents or [],
             messages=messages or [],
@@ -42,18 +79,31 @@ class AudioGroupChat(GroupChat):
         # Enable agent voice by default
         self.agent_voice_enabled = True
 
-        # Initialize audio processing components
-        print("Initializing TTS models...")
-        # Map of agent names to voice models and options
-        self.tts_models = {}
-        self.voice_options = {}  # Store voice options separately
-        # Create distinct voices using Kokoro's options
+        # Initialize audio processing components with different voice personalities
+        self.logger.info("Initializing TTS models and voice configurations...")
+        
+        # Map of agent names to their TTS models and voice configurations
+        self.tts_models = {}  # Stores TTS model instances for each agent
+        self.voice_options = {}  # Stores voice customization options for each agent
+        
+        # Define available voice personalities with their characteristics
+        # Each voice is configured with specific speed and language settings
+        # to create distinct and natural-sounding personalities
         self.available_voices = [
-            ("energetic", KokoroTTSOptions(speed=1.5, lang="en-us")),     # Fast, energetic voice
-            ("calm", KokoroTTSOptions(speed=0.75, lang="en-us")),         # Slower, calmer voice
-            ("british", KokoroTTSOptions(speed=1.0, lang="en-gb")),       # British accent
-            ("authoritative", KokoroTTSOptions(speed=0.9, lang="en-us")), # Slightly slower, authoritative
-            ("default", KokoroTTSOptions(speed=1.0, lang="en-us")),       # Normal voice
+            # Energetic voice - faster pace for dynamic responses
+            ("energetic", KokoroTTSOptions(speed=1.5, lang="en-us")),
+            
+            # Calm voice - slower pace for thoughtful explanations
+            ("calm", KokoroTTSOptions(speed=0.75, lang="en-us")),
+            
+            # British accent - adds variety with different English dialect
+            ("british", KokoroTTSOptions(speed=1.0, lang="en-gb")),
+            
+            # Authoritative voice - slightly slower for emphasis
+            ("authoritative", KokoroTTSOptions(speed=0.9, lang="en-us")),
+            
+            # Default voice - balanced pace and standard accent
+            ("default", KokoroTTSOptions(speed=1.0, lang="en-us")),
         ]
         self.next_voice_index = 0
         # Default model for unassigned agents
@@ -78,29 +128,67 @@ class AudioGroupChat(GroupChat):
         self.stt_model = get_stt_model()
         print("STT model initialized")
 
-        # Configure WebRTC settings
+        # Configure WebRTC settings for real-time audio streaming
+        # If Twilio credentials are available, use them for TURN server configuration
+        # This enables reliable audio streaming even through NATs and firewalls
+        self.logger.info("Configuring WebRTC settings...")
         self.rtc_config = get_twilio_turn_credentials() if os.environ.get("TWILIO_ACCOUNT_SID") else None
 
-        # Create FastRTC stream for audio handling with ReplyOnPause
+        # Configure audio processing algorithm options for optimal voice detection
+        # These settings are tuned for natural conversation flow and accurate transcription
+        self.logger.info("Setting up audio processing parameters...")
         algo_options = AlgoOptions(
-            audio_chunk_duration=1.0,  # Longer chunks for better transcription
-            started_talking_threshold=0.2,  # More sensitive to speech start
-            speech_threshold=0.1,  # More sensitive to ongoing speech
+            # Use 1-second chunks for better speech recognition accuracy
+            audio_chunk_duration=1.0,
+            
+            # Set lower threshold for detecting speech start
+            # This makes the system more responsive to user input
+            started_talking_threshold=0.2,
+            
+            # Configure ongoing speech detection sensitivity
+            # Lower threshold helps capture softer speech segments
+            speech_threshold=0.1,
         )
 
-        # Create a handler that maintains state per participant
+        # Initialize state management for participants
+        # This dictionary tracks the audio processing state and settings for each participant
+        # Keys are participant IDs, values are dictionaries containing:
+        # - Audio processing settings
+        # - Voice activity detection state
+        # - Transcription buffers
+        # - Connection status
         self.participant_states = {}
 
-        # Create main handler for audio processing
+        # Define the main audio processing callback
+        # This asynchronous function handles real-time audio processing for all participants
         async def audio_callback(frame, additional_inputs=None):
+            """Process incoming audio frames from participants.
+            
+            This callback function handles the real-time audio processing pipeline:
+            1. Extracts and validates the user ID from additional inputs
+            2. Processes the audio frame data
+            3. Performs voice activity detection
+            4. Manages audio transcription
+            5. Triggers appropriate responses from AI agents
+            
+            Args:
+                frame: Audio frame data, can be either:
+                    - Tuple of (sample_rate, audio_array)
+                    - Dictionary with 'sr' and 'value' keys
+                additional_inputs: Optional list containing user identification info
+                    - Can be string ID or object with 'value' attribute
+            
+            Returns:
+                None if processing fails, processed audio data otherwise
+            """
             try:
-                # Get user ID from additional inputs
+                # Extract user ID from additional inputs with robust type checking
                 user_id = None
                 if additional_inputs and len(additional_inputs) > 0:
                     if isinstance(additional_inputs[0], str):
-                        user_id = additional_inputs[0]
+                        user_id = additional_inputs[0]  # Direct string ID
                     elif hasattr(additional_inputs[0], 'value'):
-                        user_id = additional_inputs[0].value
+                        user_id = additional_inputs[0].value  # Object with value attribute
 
                 if not user_id:
                     print("No user ID provided in audio callback")

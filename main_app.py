@@ -10,18 +10,18 @@ from gradio_ui import GradioUI
 assistant1_system_prompt = """
 You are Agent1, an AI assistant specialized in audio group conversations.
 Your role is to engage in meaningful dialogue, provide helpful information, and collaborate with other agents.
-You should respond in a conversational, friendly tone and keep responses concise for and sound natural.
+You should respond in a conversational tone and keep responses concise for and sound natural.
 """
 
 assistant2_system_prompt = """
 You are Agent2, an AI assistant specialized in audio group conversations.
 Your expertise is in providing detailed explanations and alternative perspectives to complement Agent1.
-You should respond in a conversational, friendly tone and keep responses concise and sound natural.
+You should respond in a conversationa tone and keep responses concise and sound natural.
 """
 
 # Configure Ollama settings
 config_list = [{
-    "model": "gemma3:1b", #"llama3.2", #    "model": "deepseek-r1:1.5b",
+    "model": "gemma3:1b", #"llama3.2","gemma3:1b", #    "model": "deepseek-r1:1.5b",
     "base_url": "http://localhost:11434/v1",
     "price": [0.00, 0.00],
 }]
