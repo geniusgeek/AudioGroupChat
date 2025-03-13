@@ -191,11 +191,21 @@ class GradioUI:
                     
                     # Return the audio response and updated messages
                     if audio_response is not None:
-                        # Convert sample rate from 24kHz to 48kHz and dtype to int16
-                        resampled_audio = np.repeat(audio_response, 2)
-                        int16_audio = (resampled_audio * 32767).astype(np.int16)
-                        print(f"Audio output: is {int16_audio}")
-                        yield (48000, int16_audio), self.audio_chat.messages
+                        # Normalize audio to [-1, 1] range before converting to int16
+                        max_val = np.max(np.abs(audio_response))
+                        if max_val > 0:
+                            normalized_audio = audio_response / max_val
+                        else:
+                            normalized_audio = audio_response
+                            
+                        # Convert to int16 range [-32768, 32767]
+                        int16_audio = (normalized_audio * 32767).astype(np.int16)
+                        
+                        # Convert sample rate from 24kHz to 48kHz
+                        resampled_audio = np.repeat(int16_audio, 2)  # Simple resampling by repeating samples
+                        
+                        print(f"Audio output stats - min: {np.min(resampled_audio)}, max: {np.max(resampled_audio)}, mean: {np.mean(resampled_audio)}")
+                        yield (48000, resampled_audio), self.audio_chat.messages
                     else:
                         yield None, self.audio_chat.messages
                     
@@ -223,10 +233,21 @@ class GradioUI:
                     
                     # Return the audio response and updated messages
                     if audio_response is not None:
-                        # Convert sample rate from 24kHz to 48kHz and dtype to int16
-                        resampled_audio = np.repeat(audio_response, 2)
-                        int16_audio = (resampled_audio * 32767).astype(np.int16)
-                        yield (48000, int16_audio), self.audio_chat.messages
+                        # Normalize audio to [-1, 1] range before converting to int16
+                        max_val = np.max(np.abs(audio_response))
+                        if max_val > 0:
+                            normalized_audio = audio_response / max_val
+                        else:
+                            normalized_audio = audio_response
+                            
+                        # Convert to int16 range [-32768, 32767]
+                        int16_audio = (normalized_audio * 32767).astype(np.int16)
+                        
+                        # Convert sample rate from 24kHz to 48kHz
+                        resampled_audio = np.repeat(int16_audio, 2)  # Simple resampling by repeating samples
+                        
+                        print(f"Audio output stats - min: {np.min(resampled_audio)}, max: {np.max(resampled_audio)}, mean: {np.mean(resampled_audio)}")
+                        yield (48000, resampled_audio), self.audio_chat.messages
                     else:
                         yield None, self.audio_chat.messages
                     

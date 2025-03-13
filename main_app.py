@@ -21,7 +21,7 @@ You should respond in a conversational, friendly tone and keep responses concise
 
 # Configure Ollama settings
 config_list = [{
-    "model": "llama3.2", #    "model": "deepseek-r1:1.5b",
+    "model": "gemma3:1b", #"llama3.2", #    "model": "deepseek-r1:1.5b",
     "base_url": "http://localhost:11434/v1",
     "price": [0.00, 0.00],
 }]
@@ -47,27 +47,13 @@ agent2 = AssistantAgent(
     code_execution_config=False  # Disable code execution
 )
 
-# Create a UserProxyAgent for the human user with proper configuration
-human_system_prompt = """
-You represent a human user in this conversation. Your inputs will come from actual human speech
-that has been transcribed to text. You will relay these messages to the AI assistants.
-Do not generate responses on your own - only relay the actual transcribed human speech.
-"""
-
-human_agent = UserProxyAgent(
-    name="user_123", 
-    system_message=human_system_prompt,
-    human_input_mode="NEVER",
-    code_execution_config={"use_docker": False}
-)
-
 print("\nInitializing Audio Group Chat...")
-print("1. Creating agents:", ["Agent1", "Agent2", "user_123"])
+print("1. Creating agents:", ["Agent1", "Agent2"])
 
 # Create audio-enabled group chat with manager
 audio_chat = AudioGroupChat(
     messages=[],
-    agents=[agent1, agent2, human_agent],
+    agents=[agent1, agent2],
     max_round=5,
     speaker_selection_method="round_robin",  # Ensure all agents get a turn
     allow_repeat_speaker=True  # Allow agents to speak multiple times
@@ -93,24 +79,71 @@ async def main():
         demo = ui.create_interface()
         
         print("5. Initializing audio chat components...")
-        # Initialize audio chat
-        await audio_chat.initialize()
+        # Initialize audio chat and wait for it to complete before starting Gradio
+        try:
+            print("\n=== Starting Audio Chat Initialization ===\n")
+            await audio_chat.initialize()
+            print("\n=== Audio Chat Initialization Complete ===\n")
+        except Exception as e:
+            print(f"\n=== Audio Chat Initialization Failed ===\n")
+            print(f"Error: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
         
         print("6. Starting audio session...")
         # Audio session and participant addition will be handled by Gradio UI
         
         print("7. Launching web interface...")
-        # Launch with specific configurations
-        await demo.launch(
+        # Launch Gradio with minimal console output
+        gradio_task = asyncio.create_task(demo.launch(
             server_name="0.0.0.0",  # Listen on all network interfaces
             server_port=7860,       # Default Gradio port
             share=True,             # Create a public link
             show_error=True,        # Show any errors that occur
-            quiet=False             # Show all output
-        )
+            quiet=True              # Minimize Gradio output
+        ))
+        
+        # Wait for initialization to complete first
+        try:
+            await init_task
+            print("Audio chat initialization completed successfully")
+        except Exception as e:
+            print(f"Error during audio chat initialization: {e}")
+            raise
+
+        # Now wait for both tasks to complete or handle failure
+        try:
+            # Wait for either task to complete or fail
+            done, pending = await asyncio.wait(
+                [gradio_task], 
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Check for exceptions
+            for task in done:
+                if task.exception():
+                    raise task.exception()
+                
+            # Keep running until interrupted
+            await asyncio.Event().wait()
+            
+        except KeyboardInterrupt:
+            print("\nShutting down gracefully...")
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            raise
+        finally:
+            # Cancel any pending tasks
+            for task in [init_task, gradio_task]:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for tasks to complete cancellation
+            await asyncio.gather(*[init_task, gradio_task], return_exceptions=True)
+            
     except Exception as e:
-        print(f"Error: {e}")
-        traceback.print_exc()
+        print(f"Fatal error in main: {e}")
         raise
 
 if __name__ == "__main__":
@@ -119,5 +152,11 @@ if __name__ == "__main__":
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\nShutdown requested...")
+    except Exception as e:
+        print(f"Error in event loop: {e}")
+        traceback.print_exc()
     finally:
+        print("Cleaning up...")
         loop.close()
